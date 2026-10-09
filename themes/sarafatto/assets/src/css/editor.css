@@ -1,0 +1,101 @@
+@font-face {
+	font-family: "Fraunces";
+	src: url("../../fonts/fraunces/fraunces-variable.ttf") format("truetype");
+	font-style: normal;
+	font-weight: 100 900;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "Manrope";
+	src: url("../../fonts/manrope/manrope-variable.ttf") format("truetype");
+	font-style: normal;
+	font-weight: 200 800;
+	font-display: swap;
+}
+
+.editor-styles-wrapper {
+	color: var(--wp--preset--color--ink, #1a1a1a);
+	font-family: Manrope, Arial, sans-serif;
+	font-size: var(--wp--preset--font-size--body, 1rem);
+	line-height: 1.6;
+}
+
+.editor-styles-wrapper :where(h1, h2, h3, h4, h5, h6, .wp-block-heading) {
+	color: var(--wp--preset--color--ink, #1a1a1a);
+	font-family: Fraunces, Georgia, serif;
+	font-weight: 600;
+	line-height: 1.08;
+}
+
+.editor-styles-wrapper .wp-block[data-align="wide"] {
+	max-width: var(--wp--style--global--wide-size, 80rem);
+}
+
+.editor-styles-wrapper .wp-block[data-align="full"] {
+	max-width: none;
+}
+
+.editor-styles-wrapper .wp-block-button__link,
+.editor-styles-wrapper .wp-element-button {
+	min-height: 2.75rem;
+	border: 1px solid var(--wp--preset--color--ink, #1a1a1a);
+	border-radius: 9999px;
+	padding: 0.65em 1.2em;
+	background: var(--wp--preset--color--ink, #1a1a1a);
+	color: var(--wp--preset--color--white, #fff);
+	font-family: Manrope, Arial, sans-serif;
+	font-weight: 700;
+	text-decoration: none;
+}
+
+.editor-styles-wrapper .button__icon {
+	display: inline-block;
+	width: 1em;
+	height: 1em;
+	flex: 0 0 auto;
+	background-color: currentColor;
+	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M5 17.59 15.59 7H9V5h10v10h-2V8.41L6.41 19z'/%3E%3C/svg%3E") center / contain no-repeat;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M5 17.59 15.59 7H9V5h10v10h-2V8.41L6.41 19z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.editor-styles-wrapper .wp-block-button.button--sm .wp-block-button__link,
+.editor-styles-wrapper .wp-block-button.button--sm .wp-element-button {
+	padding-inline: clamp(1rem, 0.9vw, 1.25rem);
+	font-size: var(--button-sm-font-size, 0.875rem);
+}
+
+.editor-styles-wrapper .wp-block-button.button--lg .wp-block-button__link,
+.editor-styles-wrapper .wp-block-button.button--lg .wp-element-button {
+	padding-inline: clamp(1.25rem, 1.5vw, 1.75rem);
+	font-size: var(--button-lg-font-size, 1rem);
+}
+
+.editor-styles-wrapper .wp-block-button.is-style-sarafatto-accent .wp-block-button__link {
+	border-color: var(--wp--preset--color--yellow, #ffc942);
+	background: var(--wp--preset--color--yellow, #ffc942);
+	color: var(--wp--preset--color--ink, #1a1a1a);
+}
+
+.editor-styles-wrapper .wp-block-button.is-style-sarafatto-secondary .wp-block-button__link {
+	border-color: var(--wp--preset--color--ink, #1a1a1a);
+	background: transparent;
+	color: var(--wp--preset--color--ink, #1a1a1a);
+}
+
+.editor-styles-wrapper .wp-block-button.is-style-sarafatto-text .wp-block-button__link {
+	min-height: 0;
+	padding: 0;
+	border-color: transparent;
+	border-radius: 0;
+	background: transparent;
+	color: var(--wp--preset--color--ink, #1a1a1a);
+	text-decoration: underline;
+	text-underline-offset: 0.25em;
+}
+
+.editor-styles-wrapper .wp-block-button.is-style-outline .wp-block-button__link {
+	background: transparent;
+	color: var(--wp--preset--color--ink, #1a1a1a);
+}
+

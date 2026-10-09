@@ -1,0 +1,1 @@
+.sarafatto-gallery-preview{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.sarafatto-gallery-preview__item{display:flex;flex-direction:column;gap:6px;max-width:120px}.sarafatto-gallery-preview__item img{display:block;width:112px;height:112px;object-fit:cover}.sarafatto-gallery-preview__remove{align-self:flex-start}
