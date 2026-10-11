@@ -158,11 +158,34 @@ function sarafatto_get_active_occasions() {
 function sarafatto_get_product_flags( $post_id ) {
 	$product = get_post( absint( $post_id ) );
 	if ( ! $product instanceof WP_Post || 'sarafatto_prodotto' !== $product->post_type ) {
-		return array( 'is_new' => false, 'is_featured' => false );
+		return array( 'is_new' => false, 'is_featured' => false, 'is_sold_out' => false, 'personalizable' => false );
 	}
 
 	return array(
 		'is_new'      => '1' === (string) get_post_meta( $product->ID, 'sarafatto_is_new', true ),
-		'is_featured' => '1' === (string) get_post_meta( $product->ID, 'sarafatto_is_featured', true ),
+		'is_featured'    => '1' === (string) get_post_meta( $product->ID, 'sarafatto_is_featured', true ),
+		'is_sold_out'    => '1' === (string) get_post_meta( $product->ID, 'sarafatto_is_sold_out', true ),
+		'personalizable' => '1' === (string) get_post_meta( $product->ID, 'sarafatto_personalizable', true ),
 	);
+}
+
+/** Return a formatted Italian display price, or an empty string if invalid/blank. */
+function sarafatto_format_price( $price ) {
+	$normalized = sarafatto_normalize_price( $price );
+	if ( false === $normalized || '' === $normalized ) {
+		return '';
+	}
+
+	return number_format_i18n( (float) $normalized, 2 ) . ' €';
+}
+
+/** Return the stored price for a product, or an empty string when not set. */
+function sarafatto_get_product_price( $post_id ) {
+	$product = get_post( absint( $post_id ) );
+	if ( ! $product instanceof WP_Post || 'sarafatto_prodotto' !== $product->post_type ) {
+		return '';
+	}
+
+	$price = get_post_meta( $product->ID, 'sarafatto_price', true );
+	return sarafatto_sanitize_price_meta( $price );
 }

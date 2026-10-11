@@ -21,6 +21,27 @@ function sarafatto_get_current_language() {
 	return 'it';
 }
 
+/** Return the language-aware site home URL. */
+function sarafatto_get_language_home_url( $language = '' ) {
+	$language = '' !== $language ? sanitize_key( $language ) : sarafatto_get_current_language();
+	if ( function_exists( 'pll_home_url' ) ) {
+		return pll_home_url( $language );
+	}
+
+	return home_url( '/' );
+}
+
+/** Point the custom logo to the language home instead of its translated page permalink. */
+function sarafatto_filter_custom_logo_home_url( $html ) {
+	$home_url = sarafatto_get_language_home_url();
+	if ( ! is_string( $html ) || '' === $html || '' === $home_url ) {
+		return $html;
+	}
+
+	return preg_replace( '/href="[^"]*"/', 'href="' . esc_url( $home_url ) . '"', $html, 1 );
+}
+add_filter( 'get_custom_logo', 'sarafatto_filter_custom_logo_home_url' );
+
 /** Aggiunge alle query il parametro `lang` documentato da Polylang, se attivo. */
 function sarafatto_add_language_to_query_args( $args ) {
 	$args = is_array( $args ) ? $args : array();
@@ -49,6 +70,32 @@ function sarafatto_get_translation_id( $object_id, $object_type, $language = '' 
 
 	$translation_id = absint( call_user_func( $translate, $object_id, $language ) );
 	return $translation_id ? $translation_id : 0;
+}
+
+/** Keep product categories available to Polylang's term translation model. */
+function sarafatto_polylang_register_product_category_taxonomy( $taxonomies, $is_settings = false ) {
+	$taxonomies = is_array( $taxonomies ) ? $taxonomies : array();
+	$taxonomies[] = 'sarafatto_categoria';
+	$taxonomies[] = 'sarafatto_idea_regalo';
+
+	return array_values( array_unique( $taxonomies ) );
+}
+add_filter( 'pll_get_taxonomies', 'sarafatto_polylang_register_product_category_taxonomy', 10, 2 );
+
+/** Return a product category term in the requested language, or null if missing. */
+function sarafatto_get_translated_category_term( $term_id, $language = '' ) {
+	$term = get_term( absint( $term_id ), 'sarafatto_categoria' );
+	if ( ! $term instanceof WP_Term ) {
+		return null;
+	}
+
+	$translation_id = sarafatto_get_translation_id( $term->term_id, 'term', $language );
+	if ( ! $translation_id ) {
+		return null;
+	}
+
+	$translated_term = get_term( $translation_id, 'sarafatto_categoria' );
+	return $translated_term instanceof WP_Term ? $translated_term : null;
 }
 
 /** Restituisce la URL della traduzione esistente oppure una stringa vuota. */
@@ -87,6 +134,33 @@ function sarafatto_is_front_page_translation( $post_id ) {
 	return false;
 }
 
+/** Build the translated URL for the shared product archive while retaining its configured archive path. */
+function sarafatto_get_product_archive_language_url( $language ) {
+	if ( ! function_exists( 'is_post_type_archive' ) || ! is_post_type_archive( 'sarafatto_prodotto' ) || ! function_exists( 'sarafatto_get_language_home_url' ) ) {
+		return '';
+	}
+
+	$archive_url = get_post_type_archive_link( 'sarafatto_prodotto' );
+	$current_url = sarafatto_get_language_home_url( sarafatto_get_current_language() );
+	$target_url  = sarafatto_get_language_home_url( $language );
+	$archive_path = is_string( $archive_url ) ? wp_parse_url( $archive_url, PHP_URL_PATH ) : '';
+	$current_path = is_string( $current_url ) ? wp_parse_url( $current_url, PHP_URL_PATH ) : '';
+	if ( ! is_string( $archive_path ) || ! is_string( $current_path ) || ! is_string( $target_url ) ) {
+		return '';
+	}
+
+	$current_prefix = trailingslashit( untrailingslashit( $current_path ) );
+	if ( '/' === $current_prefix ) {
+		$current_prefix = '/';
+	}
+	if ( 0 !== strpos( $archive_path, $current_prefix ) ) {
+		return '';
+	}
+
+	$archive_relative_path = ltrim( substr( $archive_path, strlen( $current_prefix ) ), '/' );
+	return '' !== $archive_relative_path ? trailingslashit( $target_url ) . $archive_relative_path : '';
+}
+
 /** Prepara le opzioni linguistiche del selettore custom nel contesto corrente. */
 function sarafatto_get_language_switcher_items() {
 	if ( ! function_exists( 'pll_languages_list' ) || ! function_exists( 'pll_current_language' ) ) {
@@ -105,9 +179,18 @@ function sarafatto_get_language_switcher_items() {
 
 	$object_id   = 0;
 	$object_type = '';
+	$is_front_page_context = function_exists( 'is_front_page' ) && is_front_page();
+	$is_product_archive = function_exists( 'is_post_type_archive' ) && is_post_type_archive( 'sarafatto_prodotto' );
 	if ( is_singular() || is_front_page() ) {
 		$object_id   = absint( get_queried_object_id() );
 		$object_type = 'post';
+		$language_front_page_id = absint( get_option( 'page_on_front' ) );
+		if ( $object_id && $object_id === $language_front_page_id ) {
+			$is_front_page_context = true;
+		}
+		if ( $object_id && function_exists( 'sarafatto_is_front_page_translation' ) ) {
+			$is_front_page_context = $is_front_page_context || sarafatto_is_front_page_translation( $object_id );
+		}
 	} elseif ( is_tax() || is_category() || is_tag() ) {
 		$object_id   = absint( get_queried_object_id() );
 		$object_type = 'term';
@@ -120,7 +203,16 @@ function sarafatto_get_language_switcher_items() {
 
 	$items = array();
 	foreach ( array( 'it' => 'IT', 'en' => 'EN' ) as $slug => $label ) {
-		$url = $current === $slug || ! $object_id ? '' : sarafatto_get_translation_url( $object_id, $object_type, $slug );
+		$url = '';
+		if ( $current !== $slug ) {
+			if ( $is_front_page_context ) {
+				$url = sarafatto_get_language_home_url( $slug );
+			} elseif ( $is_product_archive ) {
+				$url = sarafatto_get_product_archive_language_url( $slug );
+			} elseif ( $object_id ) {
+				$url = sarafatto_get_translation_url( $object_id, $object_type, $slug );
+			}
+		}
 		$items[] = array(
 			'slug'    => $slug,
 			'label'   => $label,
@@ -139,12 +231,19 @@ function sarafatto_polylang_copy_product_meta( $metas, $sync = false, $from = 0,
 	if ( ! $product instanceof WP_Post || 'sarafatto_prodotto' !== $product->post_type ) {
 		return $metas;
 	}
+	$metas = array_diff( $metas, array( 'sarafatto_price', 'sarafatto_sku' ) );
 	if ( $sync ) {
-		$metas = array_diff( $metas, array( 'sarafatto_editorial_label', 'sarafatto_story', 'sarafatto_gallery', '_thumbnail_id' ) );
+		$metas = array_diff( $metas, array( 'sarafatto_editorial_label', 'sarafatto_story', 'sarafatto_gallery', '_thumbnail_id', 'sarafatto_materials', 'sarafatto_dimensions', 'sarafatto_colors', 'sarafatto_variants', 'sarafatto_care', 'sarafatto_customization_details', 'sarafatto_personalization_details' ) );
 	}
-	$metas = array_merge( $metas, array( 'sarafatto_is_new', 'sarafatto_is_featured' ) );
+	$metas = array_merge( $metas, array( 'sarafatto_is_new', 'sarafatto_is_featured', 'sarafatto_is_sold_out', 'sarafatto_personalizable', 'sarafatto_is_handmade' ) );
 	if ( ! $sync ) {
 		$metas = array_merge( $metas, array( '_thumbnail_id', 'sarafatto_gallery' ) );
+	}
+	$dummy_values = get_post_meta( $product->ID, 'sarafatto_dummy_details', true );
+	$dummy_values = is_array( $dummy_values ) ? $dummy_values : array();
+	$metas = array_diff( $metas, array( 'sarafatto_dummy_details', 'sarafatto_has_dummy_details' ) );
+	if ( $dummy_values ) {
+		$metas = array_diff( $metas, array_keys( $dummy_values ) );
 	}
 	return array_values( array_unique( $metas ) );
 }

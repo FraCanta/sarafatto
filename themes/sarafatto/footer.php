@@ -10,14 +10,33 @@ $address = is_scalar( $address_value ) ? trim( (string) $address_value ) : '';
 $email = sanitize_email( $get_setting( 'email' ) );
 $maps_url = esc_url( $get_setting( 'google_maps_url' ) );
 $whatsapp_url = function_exists( 'sarafatto_get_whatsapp_url' ) ? sarafatto_get_whatsapp_url() : '';
+$footer_logo_ids = get_posts(
+	array(
+		'post_type'      => 'attachment',
+		'post_status'    => 'inherit',
+		'posts_per_page' => 1,
+		'fields'         => 'ids',
+		'meta_query'     => array(
+			array(
+				'key'     => '_wp_attached_file',
+				'value'   => 'logo_positivo_footer.png',
+				'compare' => 'LIKE',
+			),
+		),
+	)
+);
+$footer_logo_id = $footer_logo_ids ? absint( $footer_logo_ids[0] ) : 0;
+	$footer_home_url = function_exists( 'sarafatto_get_language_home_url' )
+	? sarafatto_get_language_home_url()
+	: home_url( '/' );
 $socials = array_filter(
 	array(
-		'Instagram' => $get_setting( 'social_instagram' ),
-		'Facebook'  => $get_setting( 'social_facebook' ),
-		'TikTok'    => $get_setting( 'social_tiktok' ),
-		'Pinterest' => $get_setting( 'social_pinterest' ),
+		'Instagram' => array( $get_setting( 'social_instagram' ), 'icon-[mdi--instagram]' ),
+		'Facebook'  => array( $get_setting( 'social_facebook' ), 'icon-[mdi--facebook]' ),
+		'TikTok'    => array( $get_setting( 'social_tiktok' ), 'icon-[mdi--music-note]' ),
+		'Pinterest' => array( $get_setting( 'social_pinterest' ), 'icon-[mdi--pinterest]' ),
 	),
-	static function ( $url ) { return is_string( $url ) && '' !== trim( $url ); }
+	static function ( $social ) { return is_array( $social ) && is_string( $social[0] ) && '' !== trim( $social[0] ); }
 );
 
 $info_pages = array();
@@ -31,53 +50,41 @@ if ( function_exists( 'sarafatto_get_linked_page' ) ) {
 	}
 }
 
-$locations = get_nav_menu_locations();
 $explore_items = array();
-$primary_menu_id = isset( $locations['primary'] ) ? absint( $locations['primary'] ) : 0;
-$primary_menu_items = $primary_menu_id ? wp_get_nav_menu_items( $primary_menu_id ) : array();
-$primary_menu_items = is_array( $primary_menu_items ) ? $primary_menu_items : array();
-$explore_targets = array(
-	'novita'         => array( 'Novità', 'New arrivals', '' ),
-	'idee_regalo'    => array( 'Idee regalo', 'Gift ideas', 'idee_regalo' ),
-	'personalizzati' => array( 'Personalizzati', 'Personalised', 'personalizzati' ),
-	'negozio'        => array( 'Il negozio', 'Shop', 'negozio' ),
-);
-foreach ( $explore_targets as $labels ) {
-	$label = sarafatto_theme_label( $labels[0], $labels[1] );
-	$url = '';
-	foreach ( $primary_menu_items as $menu_item ) {
-		if ( isset( $menu_item->title, $menu_item->url ) && sanitize_title( $menu_item->title ) === sanitize_title( $label ) ) {
-			$url = $menu_item->url;
-			break;
+$products_url = function_exists( 'sarafatto_get_products_archive_url' ) ? sarafatto_get_products_archive_url() : get_post_type_archive_link( 'sarafatto_prodotto' );
+if ( $products_url ) {
+	$explore_items[] = array( 'label' => sarafatto_theme_label( 'Prodotti', 'Products' ), 'url' => $products_url );
+}
+$news_url = function_exists( 'sarafatto_get_home_news_url' ) ? sarafatto_get_home_news_url() : '';
+if ( $news_url ) {
+	$explore_items[] = array( 'label' => sarafatto_theme_label( 'Novità', 'New arrivals' ), 'url' => $news_url );
+}
+foreach (
+	array(
+		'idee_regalo'    => array( 'Idee regalo', 'Gift ideas' ),
+		'personalizzati' => array( 'Personalizzati', 'Personalised' ),
+		'negozio'        => array( 'Il negozio', 'The shop' ),
+	) as $role => $labels
+) {
+	$page = function_exists( 'sarafatto_get_linked_page' ) ? sarafatto_get_linked_page( $role ) : null;
+	$url  = $page ? get_permalink( $page ) : '';
+	if ( $url ) {
+		$explore_items[] = array( 'label' => sarafatto_theme_label( $labels[0], $labels[1] ), 'url' => $url );
+	}
+}
+
+$privacy_url = function_exists( 'get_privacy_policy_url' ) ? get_privacy_policy_url() : '';
+$cookie_url  = '';
+$cookie_slugs = array( 'cookie-policy', 'politica-cookie', 'informativa-cookie', 'cookies', 'cookie' );
+foreach ( $cookie_slugs as $cookie_slug ) {
+	$cookie_page = get_page_by_path( $cookie_slug, OBJECT, 'page' );
+	if ( $cookie_page instanceof WP_Post && 'publish' === $cookie_page->post_status ) {
+		if ( function_exists( 'pll_current_language' ) && function_exists( 'sarafatto_get_translation_id' ) ) {
+			$translated_cookie_id = sarafatto_get_translation_id( $cookie_page->ID, 'post', sarafatto_get_current_language() );
+			$cookie_page = $translated_cookie_id ? get_post( $translated_cookie_id ) : null;
 		}
-	}
-	if ( ! $url && $labels[2] && function_exists( 'sarafatto_get_linked_page' ) ) {
-		$page = sarafatto_get_linked_page( $labels[2] );
-		$url = $page ? get_permalink( $page ) : '';
-	}
-	if ( $url ) { $explore_items[] = array( 'label' => $label, 'url' => $url ); }
-}
-
-$privacy_url = '';
-$privacy_page_id = absint( get_option( 'wp_page_for_privacy_policy' ) );
-if ( $privacy_page_id ) {
-	if ( function_exists( 'pll_current_language' ) && function_exists( 'sarafatto_get_translation_id' ) ) {
-		$privacy_page_id = sarafatto_get_translation_id( $privacy_page_id, 'post', sarafatto_get_current_language() );
-	}
-	$privacy_page = $privacy_page_id ? get_post( $privacy_page_id ) : null;
-	if ( $privacy_page instanceof WP_Post && 'page' === $privacy_page->post_type && 'publish' === $privacy_page->post_status ) {
-		$privacy_url = get_permalink( $privacy_page );
-	}
-}
-
-$legal_menu_id = isset( $locations['footer-legal'] ) ? absint( $locations['footer-legal'] ) : 0;
-$legal_menu_items = $legal_menu_id ? wp_get_nav_menu_items( $legal_menu_id ) : array();
-$legal_menu_items = is_array( $legal_menu_items ) ? $legal_menu_items : array();
-$privacy_in_menu = false;
-if ( $privacy_url ) {
-	foreach ( $legal_menu_items as $menu_item ) {
-		if ( isset( $menu_item->url ) && untrailingslashit( esc_url_raw( $menu_item->url ) ) === untrailingslashit( esc_url_raw( $privacy_url ) ) ) {
-			$privacy_in_menu = true;
+		if ( $cookie_page instanceof WP_Post && 'publish' === $cookie_page->post_status ) {
+			$cookie_url = get_permalink( $cookie_page );
 			break;
 		}
 	}
@@ -87,31 +94,32 @@ if ( $privacy_url ) {
 	<div class="container">
 		<section class="site-footer__cta" aria-labelledby="site-footer-cta-title">
 			<h2 class="site-footer__cta-title" id="site-footer-cta-title">
-				<span><?php echo esc_html( sarafatto_theme_label( 'Hai visto qualcosa', 'Found something' ) ); ?></span>
+				<span><?php echo esc_html( sarafatto_theme_label( 'Hai visto qualcosa', 'Seen something' ) ); ?></span>
 				<span><?php echo esc_html( sarafatto_theme_label( 'che fa per te?', 'that feels like you?' ) ); ?></span>
 			</h2>
 			<?php if ( $whatsapp_url ) : ?>
 				<div class="site-footer__cta-action">
-					<?php get_template_part( 'template-parts/components/button', null, array( 'label' => sarafatto_theme_label( 'Scrivici su WhatsApp', 'Message us on WhatsApp' ), 'href' => $whatsapp_url, 'variant' => 'accent', 'size' => 'md', 'icon' => 'arrow-up-right', 'icon_position' => 'after', 'external' => true, 'class' => 'site-footer__cta-button' ) ); ?>
+					<?php get_template_part( 'template-parts/components/button', null, array( 'label' => sarafatto_theme_label( 'Scrivimi su WhatsApp', 'Message me on WhatsApp' ), 'href' => $whatsapp_url, 'variant' => 'accent', 'size' => 'md', 'icon' => 'arrow-right', 'icon_position' => 'after', 'external' => true, 'class' => 'site-footer__cta-button' ) ); ?>
 				</div>
 			<?php endif; ?>
 		</section>
 
 		<div class="site-footer__main">
 			<div class="site-footer__brand">
-				<?php if ( has_custom_logo() ) : ?>
-					<?php the_custom_logo(); ?>
+				<?php if ( $footer_logo_id ) : ?>
+					<a class="custom-logo-link" href="<?php echo esc_url( $footer_home_url ); ?>" rel="home" aria-label="<?php echo esc_attr( get_bloginfo( 'name' ) ); ?>">
+						<?php echo wp_get_attachment_image( $footer_logo_id, 'full', false, array( 'class' => 'custom-logo', 'alt' => get_bloginfo( 'name' ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					</a>
+				<?php elseif ( has_custom_logo() ) : ?>
+					<a class="custom-logo-link" href="<?php echo esc_url( function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ); ?>" rel="home" aria-label="<?php echo esc_attr( get_bloginfo( 'name' ) ); ?>">
+						<?php echo wp_get_attachment_image( get_theme_mod( 'custom_logo' ), 'full', false, array( 'class' => 'custom-logo', 'alt' => get_bloginfo( 'name' ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					</a>
 				<?php else : ?>
-					<a class="site-footer__brand-name" href="<?php echo esc_url( home_url( '/' ) ); ?>"><?php echo esc_html( get_bloginfo( 'name' ) ); ?></a>
+					<a class="site-footer__brand-name" href="<?php echo esc_url( $footer_home_url ); ?>"><?php echo esc_html( get_bloginfo( 'name' ) ); ?></a>
 				<?php endif; ?>
 			</div>
 
-			<?php if ( has_nav_menu( 'footer' ) ) : ?>
-				<nav class="site-footer__group" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Esplora', 'Explore' ) ); ?>">
-					<h2 class="site-footer__heading"><?php echo esc_html( sarafatto_theme_label( 'Esplora', 'Explore' ) ); ?></h2>
-					<?php wp_nav_menu( array( 'theme_location' => 'footer', 'container' => false, 'menu_class' => 'site-footer__list', 'fallback_cb' => false ) ); ?>
-				</nav>
-			<?php elseif ( $explore_items ) : ?>
+			<?php if ( $explore_items ) : ?>
 				<nav class="site-footer__group" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Esplora', 'Explore' ) ); ?>">
 					<h2 class="site-footer__heading"><?php echo esc_html( sarafatto_theme_label( 'Esplora', 'Explore' ) ); ?></h2>
 					<ul class="site-footer__list">
@@ -140,23 +148,25 @@ if ( $privacy_url ) {
 						<?php if ( $whatsapp_url ) : ?><li><?php get_template_part( 'template-parts/components/whatsapp-link', null, array( 'label' => 'WhatsApp' ) ); ?></li><?php endif; ?>
 						<?php if ( $email ) : ?><li><a href="mailto:<?php echo esc_attr( $email ); ?>"><?php echo esc_html( $email ); ?></a></li><?php endif; ?>
 						<?php if ( $address ) : ?><li><address><?php echo nl2br( esc_html( $address ) ); ?><?php if ( $maps_url ) : ?> <a href="<?php echo esc_url( $maps_url ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( sarafatto_theme_label( 'Apri in Maps', 'Open in Maps' ) ); ?><span class="screen-reader-text"> (<?php echo esc_html( sarafatto_theme_label( 'si apre in una nuova scheda', 'opens in a new tab' ) ); ?>)</span></a><?php endif; ?></address></li><?php endif; ?>
-						<?php foreach ( $socials as $name => $url ) : ?>
-							<li><a href="<?php echo esc_url( $url ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $name ); ?><span class="screen-reader-text"> (<?php echo esc_html( sarafatto_theme_label( 'si apre in una nuova scheda', 'opens in a new tab' ) ); ?>)</span></a></li>
-						<?php endforeach; ?>
 					</ul>
+					<?php if ( $socials ) : ?>
+						<ul class="site-footer__socials" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Seguimi sui social', 'Follow me on social media' ) ); ?>">
+							<?php foreach ( $socials as $name => $social ) : ?>
+								<li><a href="<?php echo esc_url( $social[0] ); ?>" target="_blank" rel="noopener noreferrer" aria-label="<?php echo esc_attr( sprintf( sarafatto_theme_label( '%s di SaràFatto', 'SaràFatto on %s' ), $name ) ); ?>"><span class="site-footer__social-icon <?php echo esc_attr( $social[1] ); ?>" aria-hidden="true"></span><span class="screen-reader-text"><?php echo esc_html( $name ); ?> (<?php echo esc_html( sarafatto_theme_label( 'si apre in una nuova scheda', 'opens in a new tab' ) ); ?>)</span></a></li>
+							<?php endforeach; ?>
+						</ul>
+					<?php endif; ?>
 				</section>
 			<?php endif; ?>
 		</div>
 
 		<div class="site-footer__bottom">
-			<?php if ( ( $privacy_url && ! $privacy_in_menu ) || ( has_nav_menu( 'footer-legal' ) && $legal_menu_items ) ) : ?>
+			<?php if ( $privacy_url || $cookie_url ) : ?>
 				<nav class="site-footer__legal" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Informazioni legali', 'Legal information' ) ); ?>">
-					<?php if ( $privacy_url && ! $privacy_in_menu ) : ?>
-						<ul class="site-footer__list site-footer__legal-list"><li><a href="<?php echo esc_url( $privacy_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Privacy Policy', 'Privacy Policy' ) ); ?></a></li></ul>
-					<?php endif; ?>
-					<?php if ( has_nav_menu( 'footer-legal' ) && $legal_menu_items ) : ?>
-						<?php wp_nav_menu( array( 'theme_location' => 'footer-legal', 'container' => false, 'menu_class' => 'site-footer__list site-footer__legal-list', 'fallback_cb' => false ) ); ?>
-					<?php endif; ?>
+					<ul class="site-footer__list site-footer__legal-list">
+						<?php if ( $privacy_url ) : ?><li><a href="<?php echo esc_url( $privacy_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Privacy Policy', 'Privacy Policy' ) ); ?></a></li><?php endif; ?>
+						<?php if ( $cookie_url ) : ?><li><a href="<?php echo esc_url( $cookie_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Cookie Policy', 'Cookie Policy' ) ); ?></a></li><?php endif; ?>
+					</ul>
 				</nav>
 			<?php endif; ?>
 			<p class="site-footer__copyright">&copy; <?php echo esc_html( wp_date( 'Y' ) ); ?> <?php echo esc_html( get_bloginfo( 'name' ) ); ?></p>

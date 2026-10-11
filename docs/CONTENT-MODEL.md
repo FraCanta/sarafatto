@@ -12,8 +12,26 @@ Pagine, Prodotti e le tre tassonomie sono predisposti per le traduzioni IT/EN co
 - Breve descrizione: excerpt nativo `post_excerpt`.
 - Racconto: `sarafatto_story` (HTML filtrato con `wp_kses_post`).
 - Gallery facoltativa: `sarafatto_gallery`, array di ID immagine della Media Library.
+- Prezzo facoltativo: `sarafatto_price`, importo numerico normalizzato con due decimali, senza simbolo valuta né formattazione.
+- SKU / Codice prodotto facoltativo: `sarafatto_sku`, stringa sanitizzata fino a 100 caratteri.
 - Novità: `sarafatto_is_new`, booleano, default `false`.
 - In evidenza: `sarafatto_is_featured`, booleano, default `false`.
+
+Il prezzo accetta input con virgola o punto decimale (ad esempio `28`, `28,50` o `28.50`), rimuove gli spazi e salva una stringa numerica canonica (`28.00`, `28.50`). Un valore non valido non sovrascrive quello già salvato e genera un avviso nell’admin; un campo vuoto rimuove il meta. `sarafatto_format_price( $price )` restituisce il prezzo formattato secondo la localizzazione WordPress corrente (ad esempio `28,00 €`) oppure una stringa vuota se il valore manca/non è valido. `sarafatto_get_product_price( $post_id )` restituisce il valore canonico o una stringa vuota. Il frontend può quindi omettere il prezzo quando l’helper non restituisce un valore.
+
+Prezzo e SKU appartengono a ciascun post prodotto tradotto: Polylang non li copia e non li sincronizza automaticamente. Le traduzioni possono quindi avere lo stesso prezzo/SKU inserito manualmente oppure valori diversi.
+
+Questi campi preparano una possibile migrazione futura, senza attivare WooCommerce. Mappatura prevista:
+
+| Modello SaràFatto | WooCommerce |
+| --- | --- |
+| `sarafatto_prodotto` | Prodotto WooCommerce |
+| `sarafatto_price` | `_regular_price` |
+| `sarafatto_sku` | `_sku` |
+| Immagine in evidenza | Immagine prodotto |
+| `sarafatto_gallery` | Gallery prodotto |
+| `sarafatto_categoria` | `product_cat` |
+| `sarafatto_occasione`, `sarafatto_idea_regalo` | Possono restare tassonomie custom |
 
 I flag sono indipendenti. I prodotti iniziali non diventano Novità automaticamente. Nel frontend futuro, Novità e In evidenza saranno query di prodotti con il rispettivo flag attivo.
 
@@ -26,6 +44,10 @@ Le tre tassonomie gerarchiche sono associate ai Prodotti e i termini si creano l
 - `sarafatto_idea_regalo` — Idee regalo.
 
 Nessun termine come Natale o Estate è predefinito o codificato nel plugin.
+
+### Immagine editoriale Categorie
+
+Ogni termine `sarafatto_categoria` mantiene nome, slug e descrizione WordPress e può avere un’immagine editoriale facoltativa salvata come ID allegato in `sarafatto_category_image_id`. Il campo usa la Media Library e il valore è recuperabile con `sarafatto_get_category_image_id( $term_id )`; se il termine o l’immagine non esistono, l’helper restituisce `0`. Ogni termine tradotto può avere un’immagine propria: il plugin non sincronizza questo meta tra italiano e inglese. Il contenuto è predisposto per la futura sezione Home “Piccole grandi scoperte” e per l’archivio della singola categoria; la presentazione frontend non è implementata in questa fase.
 
 ### Metadati Occasioni
 

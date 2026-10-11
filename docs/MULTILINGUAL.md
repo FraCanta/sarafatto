@@ -6,7 +6,7 @@ Polylang Free è il layer di lingua e traduzione; il tema mantiene controllo su 
 
 In Languages → Languages aggiungere **Italiano** (`it`) e **English** (`en`), impostare Italiano come lingua predefinita e in Languages → Settings scegliere l’URL con codice lingua. Attivare l’opzione per nascondere il codice lingua predefinito, se disponibile nella configurazione selezionata. Assegnare Italiano ai contenuti già presenti prima di creare le traduzioni inglesi.
 
-In Languages → Settings → Custom post types and Taxonomies abilitare `sarafatto_prodotto` e le tassonomie `sarafatto_categoria`, `sarafatto_occasione`, `sarafatto_idea_regalo`. Sono pubbliche e registrate tramite le API WordPress standard, quindi Polylang Free può esporle nel modulo. Le Pagine WordPress sono gestite nativamente. Creare e collegare le traduzioni dalla colonna/metabox Languages di Polylang; assegnare i menu Primary IT ed EN nelle impostazioni menu per lingua.
+In Languages → Settings → Custom post types and Taxonomies abilitare `sarafatto_prodotto` e le tassonomie `sarafatto_categoria`, `sarafatto_occasione`, `sarafatto_idea_regalo`. `sarafatto_categoria` è inoltre registrata dal plugin con il filtro documentato `pll_get_taxonomies`, così la sua gestione lingua/traduzioni resta attiva anche se l’opzione viene deselezionata. Le Pagine WordPress sono gestite nativamente. Creare e collegare le traduzioni dalla colonna/metabox Languages di Polylang; assegnare i menu Primary IT ed EN nelle impostazioni menu per lingua.
 
 Le basi di rewrite restano quelle WordPress/Saràfatto (`prodotti`, `categoria`, `occasioni`, `idee-regalo`) anche nelle URL inglesi, con il normale prefisso lingua quando configurato. Non vengono inventate basi tradotte tramite rewrite personalizzate: la traduzione dei permalink base per CPT e tassonomie è una funzione Polylang Pro. Dopo la configurazione salvare Impostazioni → Permalink.
 
@@ -19,7 +19,7 @@ Il plugin usa i filtri Polylang documentati `pll_copy_post_metas`, `pll_copy_ter
 - sincronizza tra traduzioni prodotto `sarafatto_is_new` e `sarafatto_is_featured`;
 - sincronizza tra Occasioni icona, data inizio e data fine;
 - sincronizza tra Idee regalo l’icona;
-- copia in creazione Featured Image, gallery e immagini editoriali dei termini, senza aggiungerle alla lista di sincronizzazione successiva;
+- copia in creazione Featured Image, gallery e immagini editoriali delle Occasioni e Idee regalo, senza aggiungerle alla lista di sincronizzazione successiva; l’immagine editoriale di `sarafatto_categoria` resta esclusa sia dalla copia sia dalla sincronizzazione, perché appartiene al singolo termine tradotto;
 - include le tre tassonomie prodotto nel flusso di copia: Polylang usa le relazioni tra termini tradotti; se la traduzione del termine non esiste, non viene introdotta una relazione manuale al termine della lingua sorgente.
 
 Etichetta, excerpt, racconto, titoli e testi dei termini restano modificabili per lingua. Non abilitare la sincronizzazione globale di tutti i custom fields se si vogliono conservare questi testi diversi: i filtri del plugin limitano la sincronizzazione Saràfatto ai soli dati strutturali indicati.
@@ -33,6 +33,7 @@ Le immagini sono ID allegato condivisi, non copie fisiche. La copia iniziale è 
 - `sarafatto_is_polylang_active()`;
 - `sarafatto_get_current_language()` (fallback `it`);
 - `sarafatto_get_translation_id( $id, 'post'|'term', $lang )` e `sarafatto_get_translation_url(...)`, che non sostituiscono una traduzione mancante con l’originale;
+- `sarafatto_get_translated_category_term( $term_id, $lang )`, che restituisce il `WP_Term` `sarafatto_categoria` nella lingua richiesta o `null` se la traduzione non è collegata; nome e descrizione provengono dal termine restituito, la URL si ottiene con `get_term_link()` e l’immagine con `sarafatto_get_category_image_id( $term->term_id )`;
 - `sarafatto_add_language_to_query_args( $args )`, che aggiunge il `lang` documentato solo se Polylang è attivo;
 - `sarafatto_get_language_switcher_items()` per il componente tema;
 - `sarafatto_get_product_whatsapp_url( $post_id )`, che usa il titolo nella lingua corrente e una stringa-base traducibile.

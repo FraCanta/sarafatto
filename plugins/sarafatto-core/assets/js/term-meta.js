@@ -38,6 +38,7 @@
 						image.src = imageUrl;
 						image.alt = '';
 						preview.replaceChildren(image);
+						if (selectButton.dataset.replaceLabel) selectButton.textContent = selectButton.dataset.replaceLabel;
 						if (removeButton) removeButton.hidden = false;
 					});
 				}
@@ -47,6 +48,7 @@
 				event.preventDefault();
 				input.value = '0';
 				preview.replaceChildren();
+				if (selectButton.dataset.selectLabel) selectButton.textContent = selectButton.dataset.selectLabel;
 				removeButton.hidden = true;
 				selectButton.focus();
 			});

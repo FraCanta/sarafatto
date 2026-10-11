@@ -29,8 +29,8 @@ function sarafatto_home_hero_defaults() {
 	return array(
 		'eyebrow'        => sarafatto_theme_label( 'Oggetti, accessori, idee.', 'Objects, accessories, ideas.' ),
 		'headlineLine1'  => sarafatto_theme_label( 'Non tutto.', 'Not everything.' ),
-		'headlineLine2'  => sarafatto_theme_label( 'Solo quello', 'Only what' ),
-		'headlineLine3'  => sarafatto_theme_label( 'che ha', 'has' ),
+		'headlineLine2'  => sarafatto_theme_label( 'Solo quello', 'Just things' ),
+		'headlineLine3'  => sarafatto_theme_label( 'che ha', 'with a little' ),
 		'headlineAccent' => sarafatto_theme_label( 'qualcosa.', 'something.' ),
 		'description'    => sarafatto_theme_label( 'Cose originali, ironiche e di qualità, scelte con un certo gusto (e un pizzico di imprevedibilità).', 'Original, witty, quality finds, chosen with taste (and a little unpredictability).' ),
 		'ctaLabel'       => sarafatto_theme_label( 'Scopri le novità', 'Discover what’s new' ),

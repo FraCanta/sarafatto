@@ -159,6 +159,9 @@ export function initMobileMenu(lenis = null) {
     menuState = 'opening';
     closePromise = null;
     lockScroll();
+    // Keep the sticky header visible before the drawer's transition begins.
+    header.classList.add('is-menu-open');
+    header.classList.remove('is-hidden');
     panel.inert = true;
     panel.setAttribute('aria-hidden', 'true');
     setDialogState(true);
@@ -202,6 +205,7 @@ export function initMobileMenu(lenis = null) {
 
       menuState = 'closed';
       panel.classList.remove('is-visible', 'is-closing');
+      header.classList.remove('is-menu-open');
       if (desktopQuery.matches) {
         panel.inert = false;
         panel.removeAttribute('aria-hidden');

@@ -38,6 +38,14 @@ La scala condivisa è 4, 8, 12, 16, 24, 32, 48, 64, 96 e 128 px (token `1, 2, 3,
 
 Usare `.container`, `.container--content` e `.container--full`. Le immagini devono passare da API WordPress responsive quando possibile.
 
+## Ritmo verticale e voce editoriale
+
+Le sezioni della Home e le pagine editoriali formano una sequenza ariosa, con spazio visibile tra un momento e il successivo. Per la distanza tra sezioni usare i token `--section-space-sm`, `--section-space-md` e `--section-space-lg`; non confonderla con il padding interno o con il gap tra elementi. La scala attuale copre circa 160–220px su desktop, 120–160px su tablet e 88–120px su mobile. Sezioni narrative come Hero e manifesto possono usare `min-height: 100svh` o sottrarre `var(--header-height)` quando convivono con l’header; sezioni informative, CTA e liste restano guidate dai contenuti. Preferire `min-height` a un’altezza rigida.
+
+La selezione di SaràFatto è personale, di Sara. Quando i testi parlano delle sue scelte, del suo gusto, del negozio, del lavoro o dei consigli, non usare la prima persona plurale: usare la prima persona singolare («scelgo», «cerco», «mi piace») o la terza persona singolare («Sara sceglie»). Evitare formulazioni che presentino il brand come un team o un’agenzia. La regola vale in italiano e nelle traduzioni, mantenendo un tono diretto, spontaneo, curioso e mai istituzionale.
+
+Le sezioni narrative mantengono wrapper separati e classi semantiche per intro, titolo, copy, CTA e media, così testo e immagini potranno ricevere animazioni in sequenza. Non introdurre GSAP, stati di scroll o RAF aggiuntivi senza richiesta. L’header conserva `.site-header` come base a cui in futuro si potranno aggiungere modifier class come `.is-scrolled`, `.is-hidden` e `.is-visible`; non attivare questi comportamenti in anticipo. Le animazioni future dovranno restare compatibili con Lenis.
+
 ## Radius, bordi e motion
 
 I radius di superfici e dettagli restano 2px e 4px; i button hanno il token condiviso `--radius-pill` (9999px). Le superfici preferiscono linee, underline e contrasto tipografico alle card. Token motion: `--duration-fast` (120ms), `--duration-normal` (180ms), `--duration-slow` (320ms), `--duration-menu` (550ms), `--easing-standard`, `--easing-soft` e `--easing-menu`. Applicare transizioni solo a stati interattivi; `prefers-reduced-motion` riduce transizioni e animazioni.
@@ -74,7 +82,7 @@ Il blocco core Pulsante usa la stessa base e offre gli stili selezionabili **Sar
 | --- | --- | --- |
 | `primary` | Ink `#1A1A1A`, testo White | CTA principale |
 | `accent` | Giallo `#FFC942`, testo Ink | CTA evidenziata su fondi scuri |
-| `secondary` | Fondo trasparente, bordo Ink da 1px, testo Ink | Azione alternativa |
+| `secondary` | Fondo trasparente, bordo Ink da 1px e testo Ink; all’hover si riempie Ink e il testo diventa White | Azione alternativa outlined; è la variante usata dalla CTA «Scopri come scelgo» |
 | `text` | Nessun contenitore, underline editoriale | Link che non richiede un pulsante |
 
 Le size `sm`, `md` e `lg` cambiano solo font e padding; `md` è il default. Font-size: `clamp(0.875rem, 0.8vw, 1rem)`, `clamp(0.95rem, 0.9vw, 1.075rem)` e `clamp(1rem, 1vw, 1.15rem)`. Tutte le varianti con contenitore usano `--radius-pill: 9999px`, altezza minima 44px e lo stesso gap icona/testo (`--button-icon-gap`). Su mobile la size mantiene il target di 44px. L’icona è opzionale, può precedere o seguire il testo, è decorativa per gli screen reader ed è allineata al centro. Le icone Iconify usano il plugin Tailwind 3 e il set Material Design (`mdi`) installato nel tema.

@@ -1,6 +1,9 @@
 <?php
 /** Site header and responsive primary navigation. */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
+$header_home_url = function_exists( 'sarafatto_get_language_home_url' )
+	? sarafatto_get_language_home_url()
+	: home_url( '/' );
 ?><!doctype html>
 <html <?php language_attributes(); ?>>
 <head>
@@ -12,8 +15,12 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 <?php wp_body_open(); sarafatto_skip_link(); ?>
 <header class="site-header">
 	<div class="container site-header__inner">
-		<?php if ( has_custom_logo() ) : the_custom_logo(); else : ?>
-			<a class="site-title" href="<?php echo esc_url( home_url( '/' ) ); ?>"><?php echo esc_html( get_bloginfo( 'name' ) ); ?></a>
+		<?php if ( has_custom_logo() ) : ?>
+			<a class="custom-logo-link" href="<?php echo esc_url( $header_home_url ); ?>" rel="home" aria-label="<?php echo esc_attr( get_bloginfo( 'name' ) ); ?>">
+				<?php echo wp_get_attachment_image( get_theme_mod( 'custom_logo' ), 'full', false, array( 'class' => 'custom-logo', 'alt' => get_bloginfo( 'name' ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+			</a>
+		<?php else : ?>
+			<a class="site-title" href="<?php echo esc_url( $header_home_url ); ?>"><?php echo esc_html( get_bloginfo( 'name' ) ); ?></a>
 		<?php endif; ?>
 
 		<button class="site-header__toggle" type="button" aria-expanded="false" aria-controls="site-navigation-panel" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Apri il menu', 'Open menu' ) ); ?>" data-open-label="<?php echo esc_attr( sarafatto_theme_label( 'Apri il menu', 'Open menu' ) ); ?>" data-close-label="<?php echo esc_attr( sarafatto_theme_label( 'Chiudi il menu', 'Close menu' ) ); ?>">
@@ -37,7 +44,7 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 					'template-parts/components/button',
 					null,
 					array(
-						'label'            => sarafatto_theme_label( 'Scrivici su WhatsApp', 'Message us on WhatsApp' ),
+						'label'            => sarafatto_theme_label( 'Scrivimi su WhatsApp', 'Message me on WhatsApp' ),
 						'href'             => $header_whatsapp_url,
 						'variant'          => 'primary',
 						'size'             => 'sm',

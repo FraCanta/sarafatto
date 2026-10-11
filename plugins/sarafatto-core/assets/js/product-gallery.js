@@ -2,6 +2,40 @@
 	'use strict';
 
 	$(function () {
+		document.querySelectorAll('[data-sarafatto-demo-action]').forEach((button) => {
+			button.addEventListener('click', () => {
+				const nonce = document.getElementById('sarafatto_demo_nonce');
+				if (!nonce || !nonce.value) return;
+
+				const form = document.createElement('form');
+				form.method = 'post';
+				form.action = button.dataset.sarafattoDemoAction;
+				form.hidden = true;
+				[
+					['post_id', button.dataset.productId],
+					['sarafatto_demo_nonce', nonce.value],
+				].forEach(([name, value]) => {
+					const field = document.createElement('input');
+					field.type = 'hidden';
+					field.name = name;
+					field.value = value;
+					form.appendChild(field);
+				});
+				document.body.appendChild(form);
+				form.requestSubmit();
+			});
+		});
+
+		const personalizable = document.getElementById('sarafatto-personalizable');
+		const customizationRow = document.getElementById('sarafatto-customization-details-row');
+		if (personalizable && customizationRow) {
+			const updateCustomizationVisibility = () => {
+				customizationRow.hidden = !personalizable.checked;
+			};
+			personalizable.addEventListener('change', updateCustomizationVisibility);
+			updateCustomizationVisibility();
+		}
+
 		const input = document.getElementById('sarafatto-gallery-ids');
 		const preview = document.getElementById('sarafatto-gallery-preview');
 		const addButton = document.getElementById('sarafatto-gallery-add');
