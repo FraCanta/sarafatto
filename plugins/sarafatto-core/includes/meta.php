@@ -22,6 +22,8 @@ function sarafatto_register_post_meta() {
 		// Keep the previous key registered so existing saved values remain accessible.
 		'sarafatto_personalization_details' => array( 'string', 'sanitize_textarea_field' ),
 		'sarafatto_story'           => array( 'string', 'sarafatto_sanitize_story' ),
+		'sarafatto_story_title'     => array( 'string', 'sanitize_text_field' ),
+		'sarafatto_story_image'     => array( 'integer', 'sarafatto_sanitize_product_image_id' ),
 		'sarafatto_gallery'         => array( 'array', 'sarafatto_sanitize_gallery_ids' ),
 		'sarafatto_price'           => array( 'string', 'sarafatto_sanitize_price_meta' ),
 		'sarafatto_sku'             => array( 'string', 'sarafatto_sanitize_sku' ),
@@ -50,6 +52,12 @@ function sarafatto_sanitize_meta_text( $value ) {
 
 function sarafatto_sanitize_story( $value ) {
 	return wp_kses_post( is_scalar( $value ) ? (string) $value : '' );
+}
+
+/** Keep editorial product images restricted to valid image attachments. */
+function sarafatto_sanitize_product_image_id( $value ) {
+	$image_id = absint( $value );
+	return $image_id && wp_attachment_is_image( $image_id ) ? $image_id : 0;
 }
 
 /** Normalize a human-entered amount to a two-decimal numeric string, or false. */

@@ -20,7 +20,11 @@ function sarafatto_get_setting( $key, $default = '' ) {
 	}
 
 	$value = is_scalar( $settings[ $key ] ) ? $settings[ $key ] : $default;
-	$translatable_keys = array( 'orari', 'whatsapp_message', 'shipping_title', 'shipping_text', 'shipping_zone' );
+	$translatable_keys = array(
+		'orari', 'whatsapp_message', 'shipping_title', 'shipping_text', 'shipping_zone',
+		'home_personalized_eyebrow', 'home_personalized_title', 'home_personalized_lead',
+		'home_personalized_body', 'home_personalized_tags', 'home_personalized_cta_label',
+	);
 	if ( is_string( $value ) && in_array( $key, $translatable_keys, true ) && function_exists( 'pll__' ) ) {
 		return pll__( $value );
 	}

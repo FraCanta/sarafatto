@@ -233,11 +233,11 @@ function sarafatto_polylang_copy_product_meta( $metas, $sync = false, $from = 0,
 	}
 	$metas = array_diff( $metas, array( 'sarafatto_price', 'sarafatto_sku' ) );
 	if ( $sync ) {
-		$metas = array_diff( $metas, array( 'sarafatto_editorial_label', 'sarafatto_story', 'sarafatto_gallery', '_thumbnail_id', 'sarafatto_materials', 'sarafatto_dimensions', 'sarafatto_colors', 'sarafatto_variants', 'sarafatto_care', 'sarafatto_customization_details', 'sarafatto_personalization_details' ) );
+		$metas = array_diff( $metas, array( 'sarafatto_editorial_label', 'sarafatto_story', 'sarafatto_story_title', 'sarafatto_story_image', 'sarafatto_gallery', '_thumbnail_id', 'sarafatto_materials', 'sarafatto_dimensions', 'sarafatto_colors', 'sarafatto_variants', 'sarafatto_care', 'sarafatto_customization_details', 'sarafatto_personalization_details' ) );
 	}
 	$metas = array_merge( $metas, array( 'sarafatto_is_new', 'sarafatto_is_featured', 'sarafatto_is_sold_out', 'sarafatto_personalizable', 'sarafatto_is_handmade' ) );
 	if ( ! $sync ) {
-		$metas = array_merge( $metas, array( '_thumbnail_id', 'sarafatto_gallery' ) );
+		$metas = array_merge( $metas, array( '_thumbnail_id', 'sarafatto_gallery', 'sarafatto_story_image' ) );
 	}
 	$dummy_values = get_post_meta( $product->ID, 'sarafatto_dummy_details', true );
 	$dummy_values = is_array( $dummy_values ) ? $dummy_values : array();
@@ -307,11 +307,28 @@ function sarafatto_register_polylang_strings() {
 		'shipping_title'   => false,
 		'shipping_text'    => true,
 		'shipping_zone'    => false,
+		'home_personalized_eyebrow' => false,
+		'home_personalized_title'   => true,
+		'home_personalized_lead'    => true,
+		'home_personalized_body'    => true,
+		'home_personalized_tags'    => true,
+		'home_personalized_cta_label' => false,
 	);
 	foreach ( $strings as $key => $multiline ) {
 		if ( isset( $settings[ $key ] ) && is_scalar( $settings[ $key ] ) && '' !== (string) $settings[ $key ] ) {
 			pll_register_string( 'sarafatto_' . $key, (string) $settings[ $key ], 'Saràfatto', $multiline );
 		}
+	}
+	$personalized_defaults = array(
+		'home_personalized_eyebrow'    => 'PERSONALIZZATI',
+		'home_personalized_title'      => "Hai qualcosa\nda dire?",
+		'home_personalized_lead'       => "Se non lo trovi tra i miei prodotti,\npossiamo personalizzarlo insieme.",
+		'home_personalized_body'       => "Frasi, parole, piccoli regali e oggetti da rendere più tuoi.\nMi racconti l’idea, ti dico cosa si può fare e su quali prodotti.",
+		'home_personalized_tags'       => 'Tazze, Pochette, Shopper, Felpe',
+		'home_personalized_cta_label'  => 'Scopri come funziona',
+	);
+	foreach ( $personalized_defaults as $key => $default ) {
+		pll_register_string( 'sarafatto_' . $key, $default, 'Saràfatto', $strings[ $key ] );
 	}
 	pll_register_string( 'sarafatto_product_whatsapp_template', 'Ciao! Vorrei avere qualche informazione su %s.', 'Saràfatto', false );
 	pll_register_string( 'sarafatto_language_switcher_label', 'Lingua', 'Saràfatto', false );

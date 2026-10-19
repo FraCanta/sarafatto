@@ -36,6 +36,42 @@
 			updateCustomizationVisibility();
 		}
 
+		const storyImageInput = document.getElementById('sarafatto-story-image-id');
+		const storyImagePreview = document.getElementById('sarafatto-story-image-preview');
+		const storyImageSelect = document.getElementById('sarafatto-story-image-select');
+		const storyImageRemove = document.getElementById('sarafatto-story-image-remove');
+		if (storyImageInput && storyImagePreview && storyImageSelect && storyImageRemove && wp && wp.media) {
+			let storyImageFrame;
+			storyImageSelect.addEventListener('click', () => {
+				if (!storyImageFrame) {
+					storyImageFrame = wp.media({
+						title: l10n.storyTitle,
+						button: { text: l10n.storyButton },
+						library: { type: 'image' },
+						multiple: false,
+					});
+					storyImageFrame.on('select', () => {
+						const attachment = storyImageFrame.state().get('selection').first().toJSON();
+						const thumbnail = attachment.sizes && attachment.sizes.thumbnail;
+						const image = document.createElement('img');
+						image.src = thumbnail ? thumbnail.url : attachment.url;
+						image.alt = '';
+						image.loading = 'lazy';
+						storyImagePreview.replaceChildren(image);
+						storyImageInput.value = String(attachment.id);
+						storyImageRemove.hidden = false;
+					});
+				}
+				storyImageFrame.open();
+			});
+			storyImageRemove.addEventListener('click', () => {
+				storyImageInput.value = '0';
+				storyImagePreview.replaceChildren();
+				storyImageRemove.hidden = true;
+				storyImageSelect.focus();
+			});
+		}
+
 		const input = document.getElementById('sarafatto-gallery-ids');
 		const preview = document.getElementById('sarafatto-gallery-preview');
 		const addButton = document.getElementById('sarafatto-gallery-add');

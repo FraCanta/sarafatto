@@ -27,8 +27,8 @@ export default {
     },
     extend: {
       fontFamily: {
-        body: ['var(--wp--preset--font-family--manrope)'],
-        display: ['var(--wp--preset--font-family--fraunces)'],
+        body: ['var(--wp--preset--font-family--jost)'],
+        display: ['var(--wp--preset--font-family--jost)'],
       },
       fontSize: {
         'display-xl': 'var(--wp--preset--font-size--display-xl)',

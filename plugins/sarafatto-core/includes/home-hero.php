@@ -28,11 +28,11 @@ function sarafatto_get_home_news_url() {
 function sarafatto_home_hero_defaults() {
 	return array(
 		'eyebrow'        => sarafatto_theme_label( 'Oggetti, accessori, idee.', 'Objects, accessories, ideas.' ),
-		'headlineLine1'  => sarafatto_theme_label( 'Non tutto.', 'Not everything.' ),
-		'headlineLine2'  => sarafatto_theme_label( 'Solo quello', 'Just things' ),
-		'headlineLine3'  => sarafatto_theme_label( 'che ha', 'with a little' ),
-		'headlineAccent' => sarafatto_theme_label( 'qualcosa.', 'something.' ),
-		'description'    => sarafatto_theme_label( 'Cose originali, ironiche e di qualità, scelte con un certo gusto (e un pizzico di imprevedibilità).', 'Original, witty, quality finds, chosen with taste (and a little unpredictability).' ),
+		'headlineLine1'  => sarafatto_theme_label( 'Non sai come dirlo?', 'Not sure how to say it?' ),
+		'headlineLine2'  => sarafatto_theme_label( 'Fallo con', 'Say it with' ),
+		'headlineLine3'  => '',
+		'headlineAccent' => sarafatto_theme_label( 'la frase giusta', 'the right words' ),
+		'description'    => sarafatto_theme_label( 'Accessori, idee regalo e creazioni originali,<br>anche da personalizzare con parole, frasi e idee tutte tue.', 'Accessories, gift ideas and original creations,<br>including pieces to personalise with your own words, phrases and ideas.' ),
 		'ctaLabel'       => sarafatto_theme_label( 'Scopri le novità', 'Discover what’s new' ),
 	);
 }
@@ -40,12 +40,12 @@ function sarafatto_home_hero_defaults() {
 /** Render the fixed Home Hero outside the Gutenberg page content. */
 function sarafatto_render_home_hero() {
 	$content = sarafatto_home_hero_defaults();
-	$desktop = array( get_theme_file_uri( 'assets/images/home-hero-desktop.png' ), 1672, 941 );
-	$mobile  = array( get_theme_file_uri( 'assets/images/home-hero-mobile.png' ), 941, 1672 );
+	$desktop = array( get_theme_file_uri( 'assets/images/home-hero-desktop.png' ), 1536, 1024 );
+	$mobile  = $desktop;
 	$news_url = sarafatto_get_home_news_url();
 
 	return sprintf(
-		'<section class="home-hero" aria-labelledby="home-hero-title"><div class="home-hero__inner"><div class="home-hero__content"><p class="eyebrow home-hero__eyebrow">%1$s</p><h1 id="home-hero-title" class="home-hero__title"><span>%2$s</span> <span>%3$s</span> <span>%4$s <span class="home-hero__underline editorial-underline editorial-underline--01">%5$s</span></span></h1><p class="home-hero__description">%6$s</p><a class="button button--primary button--lg home-hero__button" href="%7$s">%8$s <span class="button__icon icon-[mdi--arrow-top-right]" aria-hidden="true"></span></a></div><figure class="home-hero__visual" aria-hidden="true"><picture><source media="(min-width: 48rem) and (max-width: 63.999rem)" srcset="%12$s" width="%13$d" height="%14$d"><source media="(max-width: 48.875rem)" srcset="%9$s" width="%10$d" height="%11$d"><img class="home-hero__image" src="%12$s" sizes="(min-width: 48rem) and (max-width: 63.999rem) 88vw, (min-width: 48.875rem) 60vw, 90vw" alt="" width="%13$d" height="%14$d" fetchpriority="high" decoding="async"></picture></figure></div></section>',
+		'<section class="home-hero" aria-labelledby="home-hero-title"><div class="home-hero__inner"><div class="home-hero__content"><h1 id="home-hero-title" class="home-hero__title"><span>%2$s</span> <span>%3$s</span> <span>%4$s <span class="home-hero__accent-line"><span class="home-hero__underline editorial-underline editorial-underline--01">%5$s</span><span class="home-hero__punctuation">!</span></span></span></h1><p class="home-hero__description">%6$s</p><a class="button button--primary button--lg home-hero__button" href="%7$s">%8$s <span class="button__icon icon-[mdi--arrow-top-right]" aria-hidden="true"></span></a></div><figure class="home-hero__visual" aria-hidden="true"><picture><source media="(min-width: 48rem) and (max-width: 63.999rem)" srcset="%12$s" width="%13$d" height="%14$d"><source media="(max-width: 48.875rem)" srcset="%9$s" width="%10$d" height="%11$d"><img class="home-hero__image" src="%12$s" sizes="(min-width: 48rem) and (max-width: 63.999rem) 88vw, (min-width: 48.875rem) 60vw, 90vw" alt="" width="%13$d" height="%14$d" fetchpriority="high" decoding="async"></picture></figure></div></section>',
 		wp_kses_post( $content['eyebrow'] ),
 		wp_kses_post( $content['headlineLine1'] ),
 		wp_kses_post( $content['headlineLine2'] ),

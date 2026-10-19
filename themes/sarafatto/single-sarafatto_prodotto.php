@@ -11,14 +11,20 @@ while ( have_posts() ) :
 	$price       = function_exists( 'sarafatto_format_price' ) && function_exists( 'sarafatto_get_product_price' ) ? sarafatto_format_price( sarafatto_get_product_price( $product_id ) ) : '';
 	$excerpt     = trim( (string) get_post_field( 'post_excerpt', $product_id ) );
 	$story       = get_post_meta( $product_id, 'sarafatto_story', true );
-	$story       = is_string( $story ) && '' !== trim( wp_strip_all_tags( $story ) ) ? $story : get_post_field( 'post_content', $product_id );
+	$story       = is_string( $story ) ? $story : '';
+	$story_title = get_post_meta( $product_id, 'sarafatto_story_title', true );
+	$story_title = is_scalar( $story_title ) ? trim( (string) $story_title ) : '';
+	$story_image_id = function_exists( 'sarafatto_sanitize_product_image_id' ) ? sarafatto_sanitize_product_image_id( get_post_meta( $product_id, 'sarafatto_story_image', true ) ) : absint( get_post_meta( $product_id, 'sarafatto_story_image', true ) );
+	if ( $story_image_id && ! wp_attachment_is_image( $story_image_id ) ) {
+		$story_image_id = 0;
+	}
 	$detail_fields = array(
 		'sarafatto_materials' => sarafatto_theme_label( 'Materiali', 'Materials' ),
 		'sarafatto_dimensions' => sarafatto_theme_label( 'Dimensioni', 'Dimensions' ),
 		'sarafatto_colors' => sarafatto_theme_label( 'Colori', 'Colours' ),
 		'sarafatto_variants' => sarafatto_theme_label( 'Varianti', 'Variants' ),
+		'sarafatto_customization_details' => sarafatto_theme_label( 'Personalizzazione', 'Personalization' ),
 		'sarafatto_care' => sarafatto_theme_label( 'Cura del prodotto', 'Care instructions' ),
-		'sarafatto_customization_details' => sarafatto_theme_label( 'Dettagli personalizzazione', 'Customization details' ),
 	);
 	$dummy_values = get_post_meta( $product_id, 'sarafatto_dummy_details', true );
 	$dummy_values = is_array( $dummy_values ) ? $dummy_values : array();
@@ -33,6 +39,9 @@ while ( have_posts() ) :
 			if ( empty( $flags['personalizable'] ) ) {
 				continue;
 			}
+			if ( ! is_scalar( $detail_value ) || '' === trim( (string) $detail_value ) ) {
+				$detail_value = sarafatto_theme_label( 'Sì', 'Yes' );
+			}
 		}
 		if ( ! $show_demo_data && isset( $dummy_values[ $meta_key ] ) && is_scalar( $detail_value ) && (string) $detail_value === (string) $dummy_values[ $meta_key ] ) {
 			continue;
@@ -41,18 +50,33 @@ while ( have_posts() ) :
 			$product_detail_rows[] = array( 'label' => $label, 'value' => (string) $detail_value );
 		}
 	}
-	if ( ! empty( $flags['personalizable'] ) ) {
-		array_unshift( $product_detail_rows, array( 'label' => sarafatto_theme_label( 'Personalizzabile', 'Personalizable' ), 'value' => sarafatto_theme_label( 'Sì', 'Yes' ) ) );
-	}
 	$handmade_value = get_post_meta( $product_id, 'sarafatto_is_handmade', true );
 	$handmade = '1' === (string) $handmade_value && ( $show_demo_data || ! isset( $dummy_values['sarafatto_is_handmade'] ) || (string) $handmade_value !== (string) $dummy_values['sarafatto_is_handmade'] );
 	$featured_id = get_post_thumbnail_id( $product_id );
 	$gallery_ids = function_exists( 'sarafatto_sanitize_gallery_ids' ) ? sarafatto_sanitize_gallery_ids( get_post_meta( $product_id, 'sarafatto_gallery', true ) ) : array();
 	$gallery_ids = array_values( array_unique( array_filter( array_merge( $featured_id ? array( $featured_id ) : array(), $gallery_ids ) ) ) );
 	$main_image_id = $gallery_ids ? (int) $gallery_ids[0] : 0;
-	$categories = get_the_terms( $product_id, 'sarafatto_categoria' );
-	$occasions  = get_the_terms( $product_id, 'sarafatto_occasione' );
-	$gift_ideas = get_the_terms( $product_id, 'sarafatto_idea_regalo' );
+	$normalize_terms = static function ( $terms ) {
+		if ( ! is_array( $terms ) ) {
+			return array();
+		}
+		return array_values( array_filter( $terms, static function ( $term ) {
+			return $term instanceof WP_Term && ! is_wp_error( get_term_link( $term ) );
+		} ) );
+	};
+	$categories = $normalize_terms( get_the_terms( $product_id, 'sarafatto_categoria' ) );
+	$occasions  = $normalize_terms( get_the_terms( $product_id, 'sarafatto_occasione' ) );
+	$gift_ideas = $normalize_terms( get_the_terms( $product_id, 'sarafatto_idea_regalo' ) );
+	$taxonomy_groups = array(
+		array( 'label' => sarafatto_theme_label( 'Categoria', 'Category' ), 'terms' => $categories ),
+		array( 'label' => sarafatto_theme_label( 'Occasione', 'Occasion' ), 'terms' => $occasions ),
+		array( 'label' => sarafatto_theme_label( 'Idea regalo', 'Gift idea' ), 'terms' => $gift_ideas ),
+	);
+	foreach ( $taxonomy_groups as $group ) {
+		if ( $group['terms'] ) {
+			$product_detail_rows[] = array( 'label' => $group['label'], 'terms' => $group['terms'] );
+		}
+	}
 	$archive_url = function_exists( 'sarafatto_get_products_archive_url' ) ? sarafatto_get_products_archive_url() : get_post_type_archive_link( 'sarafatto_prodotto' );
 	$shipping_page = function_exists( 'sarafatto_get_linked_page' ) ? sarafatto_get_linked_page( 'spedizioni' ) : null;
 	$shipping_url = $shipping_page instanceof WP_Post ? get_permalink( $shipping_page ) : '';
@@ -98,6 +122,7 @@ while ( have_posts() ) :
 			</nav>
 
 			<section class="product-single__main" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Dettagli del prodotto', 'Product details' ) ); ?>">
+				<?php $gallery_srcset_limit = static function () { return 1024; }; add_filter( 'max_srcset_image_width', $gallery_srcset_limit, 10, 0 ); ?>
 				<div class="product-gallery" data-product-gallery>
 					<figure class="product-gallery__stage">
 						<?php if ( ! empty( $flags['is_sold_out'] ) ) : ?><span class="product-card__badge product-card__badge--sold-out"><?php echo esc_html( sarafatto_theme_label( 'Esaurito', 'Sold out' ) ); ?></span><?php elseif ( ! empty( $flags['is_new'] ) ) : ?><span class="product-card__badge"><?php echo esc_html( sarafatto_theme_label( 'Novità', 'New' ) ); ?></span><?php endif; ?>
@@ -115,6 +140,7 @@ while ( have_posts() ) :
 						</div>
 					<?php endif; ?>
 				</div>
+				<?php remove_filter( 'max_srcset_image_width', $gallery_srcset_limit, 10 ); ?>
 
 				<div class="product-single__info">
 					<?php if ( ! empty( $flags['is_sold_out'] ) ) : ?><p class="product-single__eyebrow"><?php echo esc_html( sarafatto_theme_label( 'Esaurito', 'Sold out' ) ); ?></p><?php elseif ( ! empty( $flags['is_new'] ) ) : ?><p class="product-single__eyebrow"><?php echo esc_html( sarafatto_theme_label( 'Novità', 'New' ) ); ?></p><?php endif; ?>
@@ -124,42 +150,31 @@ while ( have_posts() ) :
 
 					<?php if ( ! empty( $flags['personalizable'] ) || $handmade || ( is_array( $gift_ideas ) && $gift_ideas ) ) : ?>
 						<ul class="product-single__features" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Caratteristiche', 'Features' ) ); ?>">
-							<?php if ( $handmade ) : ?><li><span class="product-single__feature-icon" aria-hidden="true">✳</span><?php echo esc_html( sarafatto_theme_label( 'Realizzato a mano', 'Handmade' ) ); ?></li><?php endif; ?>
-							<?php if ( ! empty( $flags['personalizable'] ) ) : ?><li><span class="product-single__feature-icon" aria-hidden="true">♡</span><?php echo esc_html( sarafatto_theme_label( 'Personalizzabile', 'Personalizable' ) ); ?></li><?php endif; ?>
-							<?php if ( is_array( $gift_ideas ) && $gift_ideas ) : ?><li><span class="product-single__feature-icon" aria-hidden="true">✳</span><?php echo esc_html( sarafatto_theme_label( 'Idea regalo', 'Gift idea' ) ); ?></li><?php endif; ?>
+							<?php if ( $handmade ) : ?><li><span class="product-single__feature-icon icon-[cil--eco]" aria-hidden="true"></span><?php echo esc_html( sarafatto_theme_label( 'Realizzato a mano', 'Handmade' ) ); ?></li><?php endif; ?>
+							<?php if ( ! empty( $flags['personalizable'] ) ) : ?><li><span class="product-single__feature-icon icon-[mdi--heart-outline]" aria-hidden="true"></span><?php echo esc_html( sarafatto_theme_label( 'Personalizzabile', 'Personalizable' ) ); ?></li><?php endif; ?>
+							<?php if ( $gift_ideas ) : ?><li><span class="product-single__feature-icon icon-[mdi--gift-outline]" aria-hidden="true"></span><?php echo esc_html( sarafatto_theme_label( 'Perfetto come idea regalo', 'Perfect as a gift' ) ); ?></li><?php endif; ?>
 						</ul>
 					<?php endif; ?>
 
 					<?php if ( $whatsapp_url ) : ?>
 						<div class="product-single__actions">
-							<?php get_template_part( 'template-parts/components/button', null, array( 'label' => empty( $flags['is_sold_out'] ) ? sarafatto_theme_label( 'Chiedi disponibilità su WhatsApp', 'Ask about availability on WhatsApp' ) : sarafatto_theme_label( 'Chiedi se tornerà disponibile', 'Ask if it will be available again' ), 'href' => $whatsapp_url, 'variant' => 'primary', 'size' => 'md', 'icon' => 'whatsapp', 'external' => true, 'class' => 'product-single__cta' ) ); ?>
+						<?php get_template_part( 'template-parts/components/button', null, array( 'label' => empty( $flags['is_sold_out'] ) ? sarafatto_theme_label( 'Chiedi disponibilità su WhatsApp', 'Ask about availability on WhatsApp' ) : sarafatto_theme_label( 'Chiedi se tornerà disponibile', 'Ask if it will be available again' ), 'href' => $whatsapp_url, 'variant' => 'primary', 'size' => 'md', 'icon' => 'whatsapp', 'trailing_icon' => 'arrow-right', 'external' => true, 'class' => empty( $flags['is_sold_out'] ) ? 'product-single__cta' : 'product-single__cta product-single__cta--sold-out' ) ); ?>
 						</div>
 					<?php endif; ?>
 
 					<div class="product-single__shipping">
-						<span><?php echo esc_html( sarafatto_theme_label( 'Spedizioni in Italia e in Europa.', 'Shipping across Italy and Europe.' ) ); ?></span>
-						<?php if ( $shipping_url ) : ?><a href="<?php echo esc_url( $shipping_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Come funziona', 'How it works' ) ); ?><span aria-hidden="true"> →</span></a><?php endif; ?>
+						<span class="product-single__shipping-message"><span class="icon-[mdi--truck-outline]" aria-hidden="true"></span><span><?php echo esc_html( sarafatto_theme_label( 'Spedizioni in Italia e in Europa', 'Shipping across Italy and Europe' ) ); ?></span></span>
+						<?php if ( $shipping_url ) : ?><a href="<?php echo esc_url( $shipping_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Come funziona', 'How it works' ) ); ?><span class="icon-[mdi--arrow-right]" aria-hidden="true"></span></a><?php endif; ?>
 					</div>
-
-					<?php $taxonomy_groups = array(
-						array( 'label' => sarafatto_theme_label( 'Categoria', 'Category' ), 'terms' => $categories ),
-						array( 'label' => sarafatto_theme_label( 'Occasione', 'Occasion' ), 'terms' => $occasions ),
-						array( 'label' => sarafatto_theme_label( 'Idea regalo', 'Gift idea' ), 'terms' => $gift_ideas ),
-					); $has_taxonomy = false; foreach ( $taxonomy_groups as $group ) { if ( is_array( $group['terms'] ) && $group['terms'] ) { $has_taxonomy = true; break; } } ?>
-					<?php if ( $has_taxonomy ) : ?><div class="product-single__taxonomies">
-						<?php foreach ( $taxonomy_groups as $group ) : if ( ! is_array( $group['terms'] ) || ! $group['terms'] ) { continue; } ?>
-							<div class="product-single__taxonomy"><span><?php echo esc_html( $group['label'] ); ?></span><ul><?php foreach ( $group['terms'] as $term ) : $term_url = get_term_link( $term ); if ( is_wp_error( $term_url ) ) { continue; } ?><li><a href="<?php echo esc_url( $term_url ); ?>"><?php echo esc_html( $term->name ); ?></a></li><?php endforeach; ?></ul></div>
-						<?php endforeach; ?>
-					</div><?php endif; ?>
 
 				<?php if ( $product_detail_rows ) : ?>
 						<section class="product-single__details" aria-labelledby="product-details-title">
 							<h2 id="product-details-title"><?php echo esc_html( sarafatto_theme_label( 'Dettagli prodotto', 'Product details' ) ); ?></h2>
 							<div class="product-single__detail-list">
-								<?php foreach ( $product_detail_rows as $row ) : ?><div class="product-single__detail-row"><span><?php echo esc_html( $row['label'] ); ?></span><span><?php echo nl2br( esc_html( $row['value'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped text with intentional line breaks. ?></span></div><?php endforeach; ?>
+								<?php foreach ( $product_detail_rows as $row ) : ?><div class="product-single__detail-row"><span><?php echo esc_html( $row['label'] ); ?></span><span class="product-single__detail-value"><?php if ( ! empty( $row['terms'] ) ) : foreach ( $row['terms'] as $term_index => $term ) : $term_url = get_term_link( $term ); if ( is_wp_error( $term_url ) ) { continue; } ?><?php if ( $term_index > 0 ) : ?><span aria-hidden="true">, </span><?php endif; ?><a href="<?php echo esc_url( $term_url ); ?>"><?php echo esc_html( $term->name ); ?></a><?php endforeach; ?><?php else : ?><?php echo nl2br( esc_html( $row['value'] ?? '' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped text with intentional line breaks. ?><?php endif; ?></span></div><?php endforeach; ?>
 							</div>
 							<div class="product-single__detail-mobile-list">
-								<?php foreach ( $product_detail_rows as $index => $row ) : ?><details class="product-single__detail-row"><summary><?php echo esc_html( $row['label'] ); ?></summary><p><?php echo nl2br( esc_html( $row['value'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped text with intentional line breaks. ?></p></details><?php endforeach; ?>
+								<?php foreach ( $product_detail_rows as $row ) : ?><details class="product-single__detail-row"><summary><?php echo esc_html( $row['label'] ); ?></summary><div class="product-single__detail-mobile-value"><?php if ( ! empty( $row['terms'] ) ) : foreach ( $row['terms'] as $term_index => $term ) : $term_url = get_term_link( $term ); if ( is_wp_error( $term_url ) ) { continue; } ?><?php if ( $term_index > 0 ) : ?><span aria-hidden="true">, </span><?php endif; ?><a href="<?php echo esc_url( $term_url ); ?>"><?php echo esc_html( $term->name ); ?></a><?php endforeach; ?><?php else : ?><?php echo nl2br( esc_html( $row['value'] ?? '' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped text with intentional line breaks. ?><?php endif; ?></div></details><?php endforeach; ?>
 							</div>
 						</section>
 					<?php endif; ?>
@@ -167,11 +182,11 @@ while ( have_posts() ) :
 			</section>
 
 			<?php if ( '' !== trim( wp_strip_all_tags( (string) $story ) ) ) : ?>
-				<section class="product-single__story" aria-labelledby="product-story-title">
-					<?php if ( isset( $gallery_ids[1] ) ) : $story_image_id = (int) $gallery_ids[1]; $story_image_alt = get_post_meta( $story_image_id, '_wp_attachment_image_alt', true ); if ( '' === trim( (string) $story_image_alt ) ) { $story_image_alt = get_the_title( $product_id ); } ?>
+				<section class="product-single__story<?php echo $story_image_id ? '' : ' product-single__story--text-only'; ?>"<?php echo $story_title ? ' aria-labelledby="product-story-title"' : ' aria-label="' . esc_attr( sarafatto_theme_label( 'Approfondimento', 'More about this product' ) ) . '"'; ?>>
+					<?php if ( $story_image_id ) : $story_image_alt = get_post_meta( $story_image_id, '_wp_attachment_image_alt', true ); if ( '' === trim( (string) $story_image_alt ) ) { $story_image_alt = $story_title ? $story_title : get_the_title( $product_id ); } ?>
 						<figure class="product-single__story-media"><?php echo wp_get_attachment_image( $story_image_id, 'large', false, array( 'alt' => $story_image_alt, 'loading' => 'lazy', 'decoding' => 'async' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Generated by wp_get_attachment_image(). ?></figure>
 					<?php endif; ?>
-					<div class="product-single__story-content"><p class="product-single__eyebrow"><?php echo esc_html( sarafatto_theme_label( 'La storia', 'The story' ) ); ?></p><h2 id="product-story-title"><?php echo esc_html( sarafatto_theme_label( 'Qualcosa in più', 'A little more' ) ); ?></h2><?php echo apply_filters( 'the_content', $story ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress content filters handle allowed editorial markup. ?></div>
+					<div class="product-single__story-content"><?php if ( $story_title ) : ?><h2 id="product-story-title"><?php echo esc_html( $story_title ); ?></h2><?php endif; ?><?php echo apply_filters( 'the_content', $story ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress content filters handle allowed editorial markup. ?></div>
 				</section>
 			<?php endif; ?>
 

@@ -1,5 +1,14 @@
 <?php
 /** Default page template. */
+
+$gift_ideas_page_id = function_exists( 'sarafatto_get_linked_page_id' ) ? sarafatto_get_linked_page_id( 'idee_regalo' ) : 0;
+if ( $gift_ideas_page_id && is_page( $gift_ideas_page_id ) ) {
+	get_header();
+	get_template_part( 'template-parts/pages/gift-ideas' );
+	get_footer();
+	return;
+}
+
 get_header();
 ?>
 <main id="main-content" class="site-main container" tabindex="-1">

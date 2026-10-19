@@ -44,7 +44,7 @@ $header_home_url = function_exists( 'sarafatto_get_language_home_url' )
 					'template-parts/components/button',
 					null,
 					array(
-						'label'            => sarafatto_theme_label( 'Scrivimi su WhatsApp', 'Message me on WhatsApp' ),
+						'label'            => sarafatto_theme_label( 'Scrivimi', 'Message me' ),
 						'href'             => $header_whatsapp_url,
 						'variant'          => 'primary',
 						'size'             => 'sm',

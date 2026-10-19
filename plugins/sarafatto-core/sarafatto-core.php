@@ -58,6 +58,7 @@ require_once SARAFATTO_CORE_PATH . 'includes/multilingual.php';
 require_once SARAFATTO_CORE_PATH . 'includes/post-types.php';
 require_once SARAFATTO_CORE_PATH . 'includes/taxonomies.php';
 require_once SARAFATTO_CORE_PATH . 'includes/settings.php';
+require_once SARAFATTO_CORE_PATH . 'includes/home-personalized.php';
 require_once SARAFATTO_CORE_PATH . 'includes/meta.php';
 require_once SARAFATTO_CORE_PATH . 'includes/dev-dummy-data.php';
 require_once SARAFATTO_CORE_PATH . 'includes/term-meta.php';

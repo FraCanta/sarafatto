@@ -13,4 +13,5 @@ require_once get_theme_file_path( '/inc/setup.php' );
 require_once get_theme_file_path( '/inc/assets.php' );
 require_once get_theme_file_path( '/inc/enqueue.php' );
 require_once get_theme_file_path( '/inc/helpers.php' );
+require_once get_theme_file_path( '/inc/home.php' );
 require_once get_theme_file_path( '/inc/primary-navigation.php' );

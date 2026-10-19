@@ -7,6 +7,7 @@ $href       = isset( $args['href'] ) && is_scalar( $args['href'] ) ? (string) $a
 $variant    = isset( $args['variant'] ) && in_array( $args['variant'], array( 'primary', 'accent', 'secondary', 'text' ), true ) ? $args['variant'] : 'primary';
 $size       = isset( $args['size'] ) && in_array( $args['size'], array( 'sm', 'md', 'lg' ), true ) ? $args['size'] : 'md';
 $icon       = isset( $args['icon'] ) && is_scalar( $args['icon'] ) ? (string) $args['icon'] : '';
+$trailing_icon = isset( $args['trailing_icon'] ) && in_array( $args['trailing_icon'], array( 'arrow-right', 'arrow-up-right' ), true ) ? (string) $args['trailing_icon'] : '';
 $icon_position = isset( $args['icon_position'] ) && in_array( $args['icon_position'], array( 'before', 'after' ), true ) ? $args['icon_position'] : 'before';
 $disabled   = ! empty( $args['disabled'] );
 $external   = ! empty( $args['external'] );
@@ -27,14 +28,20 @@ if ( 'whatsapp' === $icon ) {
 } else {
 	$icon_markup = '';
 }
+$trailing_icon_markup = '';
+if ( 'arrow-right' === $trailing_icon ) {
+	$trailing_icon_markup = '<span class="button__icon button__icon--trailing icon-[mdi--arrow-right]" aria-hidden="true"></span>';
+} elseif ( 'arrow-up-right' === $trailing_icon ) {
+	$trailing_icon_markup = '<span class="button__icon button__icon--trailing icon-[mdi--arrow-top-right]" aria-hidden="true"></span>';
+}
 if ( ! $label ) { return; }
 if ( $href && ! $disabled ) :
 ?>
 <a class="<?php echo esc_attr( $class_name ); ?>" href="<?php echo esc_url( $href ); ?>"<?php echo $external ? ' target="_blank" rel="noopener noreferrer"' : ''; ?>>
-	<?php if ( 'before' === $icon_position ) { echo $icon_markup; } ?><span class="button__label"><?php echo esc_html( $label ); ?></span><?php if ( 'after' === $icon_position ) { echo $icon_markup; } ?><?php if ( $external ) : ?><span class="screen-reader-text"> (<?php echo esc_html( sarafatto_theme_label( 'si apre in una nuova scheda', 'opens in a new tab' ) ); ?>)</span><?php endif; ?>
+	<?php if ( 'before' === $icon_position ) { echo $icon_markup; } ?><span class="button__label"><?php echo esc_html( $label ); ?></span><?php if ( 'after' === $icon_position ) { echo $icon_markup; } ?><?php echo $trailing_icon_markup; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Icon markup is selected from a fixed allowlist above. ?><?php if ( $external ) : ?><span class="screen-reader-text"> (<?php echo esc_html( sarafatto_theme_label( 'si apre in una nuova scheda', 'opens in a new tab' ) ); ?>)</span><?php endif; ?>
 </a>
 <?php else : ?>
 <button class="<?php echo esc_attr( $class_name ); ?>" type="<?php echo esc_attr( $type ); ?>"<?php disabled( $disabled ); ?>>
-	<?php if ( 'before' === $icon_position ) { echo $icon_markup; } ?><span class="button__label"><?php echo esc_html( $label ); ?></span><?php if ( 'after' === $icon_position ) { echo $icon_markup; } ?>
+	<?php if ( 'before' === $icon_position ) { echo $icon_markup; } ?><span class="button__label"><?php echo esc_html( $label ); ?></span><?php if ( 'after' === $icon_position ) { echo $icon_markup; } ?><?php echo $trailing_icon_markup; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Icon markup is selected from a fixed allowlist above. ?>
 </button>
 <?php endif; ?>

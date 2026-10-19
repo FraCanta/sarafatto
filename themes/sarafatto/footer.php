@@ -55,15 +55,10 @@ $products_url = function_exists( 'sarafatto_get_products_archive_url' ) ? sarafa
 if ( $products_url ) {
 	$explore_items[] = array( 'label' => sarafatto_theme_label( 'Prodotti', 'Products' ), 'url' => $products_url );
 }
-$news_url = function_exists( 'sarafatto_get_home_news_url' ) ? sarafatto_get_home_news_url() : '';
-if ( $news_url ) {
-	$explore_items[] = array( 'label' => sarafatto_theme_label( 'Novità', 'New arrivals' ), 'url' => $news_url );
-}
 foreach (
 	array(
 		'idee_regalo'    => array( 'Idee regalo', 'Gift ideas' ),
 		'personalizzati' => array( 'Personalizzati', 'Personalised' ),
-		'negozio'        => array( 'Il negozio', 'The shop' ),
 	) as $role => $labels
 ) {
 	$page = function_exists( 'sarafatto_get_linked_page' ) ? sarafatto_get_linked_page( $role ) : null;
@@ -92,18 +87,6 @@ foreach ( $cookie_slugs as $cookie_slug ) {
 ?>
 <footer class="site-footer">
 	<div class="container">
-		<section class="site-footer__cta" aria-labelledby="site-footer-cta-title">
-			<h2 class="site-footer__cta-title" id="site-footer-cta-title">
-				<span><?php echo esc_html( sarafatto_theme_label( 'Hai visto qualcosa', 'Seen something' ) ); ?></span>
-				<span><?php echo esc_html( sarafatto_theme_label( 'che fa per te?', 'that feels like you?' ) ); ?></span>
-			</h2>
-			<?php if ( $whatsapp_url ) : ?>
-				<div class="site-footer__cta-action">
-					<?php get_template_part( 'template-parts/components/button', null, array( 'label' => sarafatto_theme_label( 'Scrivimi su WhatsApp', 'Message me on WhatsApp' ), 'href' => $whatsapp_url, 'variant' => 'accent', 'size' => 'md', 'icon' => 'arrow-right', 'icon_position' => 'after', 'external' => true, 'class' => 'site-footer__cta-button' ) ); ?>
-				</div>
-			<?php endif; ?>
-		</section>
-
 		<div class="site-footer__main">
 			<div class="site-footer__brand">
 				<?php if ( $footer_logo_id ) : ?>
