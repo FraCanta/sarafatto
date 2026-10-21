@@ -5,60 +5,75 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-/** Resolve the translated Novità destination for the Home Hero. */
-function sarafatto_get_home_news_url() {
-	$locations = get_nav_menu_locations();
-	$menu_id   = isset( $locations['primary'] ) ? absint( $locations['primary'] ) : 0;
-	$items     = $menu_id ? wp_get_nav_menu_items( $menu_id ) : array();
-	$items     = is_array( $items ) ? $items : array();
-	$label     = function_exists( 'sarafatto_theme_label' )
-		? sarafatto_theme_label( 'Novità', 'New arrivals' )
-		: ( function_exists( 'pll_current_language' ) && 'en' === pll_current_language( 'slug' ) ? 'New arrivals' : 'Novità' );
+/** Keep the three scene definitions together so they can later move to settings. */
+function sarafatto_home_hero_slides() {
+	$products_url = function_exists( 'sarafatto_get_products_archive_url' )
+		? sarafatto_get_products_archive_url()
+		: get_post_type_archive_link( 'sarafatto_prodotto' );
+	$gift_page   = function_exists( 'sarafatto_get_linked_page' ) ? sarafatto_get_linked_page( 'idee_regalo' ) : null;
+	$custom_page = function_exists( 'sarafatto_get_linked_page' ) ? sarafatto_get_linked_page( 'personalizzati' ) : null;
+	$home_url    = function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' );
 
-	foreach ( $items as $item ) {
-		if ( isset( $item->title, $item->url ) && sanitize_title( $item->title ) === sanitize_title( $label ) ) {
-			return esc_url_raw( $item->url );
-		}
+	return array(
+		array(
+			'id'           => 'products',
+			'title'        => 'SARÀ FATTO',
+			'copy'         => sarafatto_theme_label( 'Frasi, oggetti e idee con carattere.', 'Phrases, objects and ideas with character.' ),
+			'ctaLabel'     => sarafatto_theme_label( 'Scopri i prodotti', 'Discover our products' ),
+			'ctaUrl'       => $products_url ? $products_url : $home_url,
+			'background'   => '#F3ECE4',
+			'titleColor'   => '#1A1A1A',
+			'accentColor'  => '#FFC942',
+			'visual'       => get_theme_file_uri( '/assets/images/sara-fatto-slide.png' ),
+			'icon'         => 'icon-[mdi--shopping-outline]',
+			'selectorLabel'=> sarafatto_theme_label( 'Mostra Sarà Fatto', 'Show Sarà Fatto' ),
+		),
+		array(
+			'id'           => 'gift',
+			'title'        => sarafatto_theme_label( 'IDEE REGALO', 'GIFT IDEAS' ),
+			'copy'         => sarafatto_theme_label( 'Per quando vuoi regalare qualcosa che dica davvero qualcosa.', 'For when you want to give a gift that really says something.' ),
+			'ctaLabel'     => sarafatto_theme_label( 'Scopri le idee regalo', 'Discover gift ideas' ),
+			'ctaUrl'       => $gift_page instanceof WP_Post ? get_permalink( $gift_page ) : $home_url,
+			'background'   => '#F6E3E8',
+			'titleColor'   => '#E91E8E',
+			'accentColor'  => '#E91E8E',
+			'visual'       => get_theme_file_uri( '/assets/images/idee-regalo-slide.png' ),
+			'icon'         => 'icon-[mdi--gift-outline]',
+			'selectorLabel'=> sarafatto_theme_label( 'Mostra le idee regalo', 'Show gift ideas' ),
+		),
+		array(
+			'id'           => 'custom',
+			'title'        => sarafatto_theme_label( 'PERSONALIZZATI', 'PERSONALISED' ),
+			'copy'         => sarafatto_theme_label( 'Una frase o un’idea. La trasformiamo in qualcosa di tuo.', 'A phrase or an idea. We turn it into something of your own.' ),
+			'ctaLabel'     => sarafatto_theme_label( 'Scopri i personalizzati', 'Discover personalised gifts' ),
+			'ctaUrl'       => $custom_page instanceof WP_Post ? get_permalink( $custom_page ) : $home_url,
+			'background'   => '#DCEFED',
+			'titleColor'   => '#00A79D',
+			'accentColor'  => '#00A79D',
+			'visual'       => get_theme_file_uri( '/assets/images/personalizzati-slide.png' ),
+			'icon'         => 'icon-[mdi--creation-outline]',
+			'selectorLabel'=> sarafatto_theme_label( 'Mostra i personalizzati', 'Show personalised gifts' ),
+		),
+	);
+}
+
+/** Render the scene-switching Home Hero. */
+function sarafatto_render_home_hero() {
+	$slides     = sarafatto_home_hero_slides();
+	$first      = $slides[0];
+	$heading    = sarafatto_theme_label( 'SaràFatto — prodotti, idee regalo e personalizzati', 'SaràFatto — products, gift ideas and personalised creations' );
+	$group_label = sarafatto_theme_label( 'Seleziona una sezione', 'Choose a section' );
+	$markup     = '<div class="home-hero-scroll-frame"><section class="home-hero hero-slider" data-active-slide="products" aria-labelledby="home-hero-title">';
+	$markup    .= '<h1 id="home-hero-title" class="screen-reader-text">' . esc_html( $heading ) . '</h1>';
+	$markup    .= '<div class="hero-slider__stage" aria-hidden="true"><p class="hero-slider__title" data-hero-title>' . esc_html( $first['title'] ) . '</p><div class="hero-slide-visual" data-hero-visual><div class="hero-slide-visual__placeholder"></div></div></div>';
+	$markup    .= '<div class="hero-slider__footer"><a class="hero-slider__cta" data-hero-cta href="' . esc_url( $first['ctaUrl'] ) . '"><span class="hero-slider__cta-label" data-hero-cta-label>' . esc_html( $first['ctaLabel'] ) . '</span><span class="hero-slider__cta-arrow icon-[mdi--arrow-right]" aria-hidden="true"></span></a>';
+	$markup    .= '<div class="hero-slider__support"><p class="hero-slider__copy" id="hero-slider-copy" data-hero-copy aria-live="polite" aria-atomic="true">' . esc_html( $first['copy'] ) . '</p><div class="hero-slider__selector" role="group" aria-label="' . esc_attr( $group_label ) . '">';
+
+	foreach ( $slides as $index => $slide ) {
+		$active = 0 === $index;
+		$markup .= '<button class="hero-slider__selector-button' . ( $active ? ' is-active' : '' ) . '" type="button" data-hero-slide="' . esc_attr( $slide['id'] ) . '" data-title="' . esc_attr( $slide['title'] ) . '" data-copy="' . esc_attr( $slide['copy'] ) . '" data-cta-label="' . esc_attr( $slide['ctaLabel'] ) . '" data-cta-url="' . esc_url( $slide['ctaUrl'] ) . '" data-background="' . esc_attr( $slide['background'] ) . '" data-title-color="' . esc_attr( $slide['titleColor'] ) . '" data-accent="' . esc_attr( $slide['accentColor'] ) . '" data-visual="' . esc_attr( $slide['visual'] ) . '" aria-label="' . esc_attr( $slide['selectorLabel'] ) . '" aria-pressed="' . ( $active ? 'true' : 'false' ) . '"><span class="' . esc_attr( $slide['icon'] ) . '" aria-hidden="true"></span></button>';
 	}
 
-	return home_url( '/novita/' );
-}
-
-/** Supply translated copy for the theme-managed Home Hero. */
-function sarafatto_home_hero_defaults() {
-	return array(
-		'eyebrow'        => sarafatto_theme_label( 'Oggetti, accessori, idee.', 'Objects, accessories, ideas.' ),
-		'headlineLine1'  => sarafatto_theme_label( 'Non sai come dirlo?', 'Not sure how to say it?' ),
-		'headlineLine2'  => sarafatto_theme_label( 'Fallo con', 'Say it with' ),
-		'headlineLine3'  => '',
-		'headlineAccent' => sarafatto_theme_label( 'la frase giusta', 'the right words' ),
-		'description'    => sarafatto_theme_label( 'Accessori, idee regalo e creazioni originali,<br>anche da personalizzare con parole, frasi e idee tutte tue.', 'Accessories, gift ideas and original creations,<br>including pieces to personalise with your own words, phrases and ideas.' ),
-		'ctaLabel'       => sarafatto_theme_label( 'Scopri le novità', 'Discover what’s new' ),
-	);
-}
-
-/** Render the fixed Home Hero outside the Gutenberg page content. */
-function sarafatto_render_home_hero() {
-	$content = sarafatto_home_hero_defaults();
-	$desktop = array( get_theme_file_uri( 'assets/images/home-hero-desktop.png' ), 1536, 1024 );
-	$mobile  = $desktop;
-	$news_url = sarafatto_get_home_news_url();
-
-	return sprintf(
-		'<section class="home-hero" aria-labelledby="home-hero-title"><div class="home-hero__inner"><div class="home-hero__content"><h1 id="home-hero-title" class="home-hero__title"><span>%2$s</span> <span>%3$s</span> <span>%4$s <span class="home-hero__accent-line"><span class="home-hero__underline editorial-underline editorial-underline--01">%5$s</span><span class="home-hero__punctuation">!</span></span></span></h1><p class="home-hero__description">%6$s</p><a class="button button--primary button--lg home-hero__button" href="%7$s">%8$s <span class="button__icon icon-[mdi--arrow-top-right]" aria-hidden="true"></span></a></div><figure class="home-hero__visual" aria-hidden="true"><picture><source media="(min-width: 48rem) and (max-width: 63.999rem)" srcset="%12$s" width="%13$d" height="%14$d"><source media="(max-width: 48.875rem)" srcset="%9$s" width="%10$d" height="%11$d"><img class="home-hero__image" src="%12$s" sizes="(min-width: 48rem) and (max-width: 63.999rem) 88vw, (min-width: 48.875rem) 60vw, 90vw" alt="" width="%13$d" height="%14$d" fetchpriority="high" decoding="async"></picture></figure></div></section>',
-		wp_kses_post( $content['eyebrow'] ),
-		wp_kses_post( $content['headlineLine1'] ),
-		wp_kses_post( $content['headlineLine2'] ),
-		wp_kses_post( $content['headlineLine3'] ),
-		wp_kses_post( $content['headlineAccent'] ),
-		wp_kses_post( $content['description'] ),
-		esc_url( $news_url ),
-		esc_html( wp_strip_all_tags( $content['ctaLabel'] ) ),
-		esc_url( $mobile[0] ),
-		absint( $mobile[1] ),
-		absint( $mobile[2] ),
-		esc_url( $desktop[0] ),
-		absint( $desktop[1] ),
-		absint( $desktop[2] )
-	);
+	$markup .= '</div></div></div></section></div>';
+	return $markup;
 }

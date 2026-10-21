@@ -43,6 +43,12 @@ export function initHeaderScroll() {
     const movement = currentScrollY - lastScrollY;
     lastScrollY = currentScrollY;
 
+    if (header.dataset.heroScrollActive === 'true') {
+      accumulatedDirection = 0;
+      header.classList.remove('is-hidden');
+      return;
+    }
+
     if (currentScrollY <= SCROLL_THRESHOLD) {
       accumulatedDirection = 0;
       header.classList.remove('is-scrolled', 'is-hidden');

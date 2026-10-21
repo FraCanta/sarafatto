@@ -7,6 +7,7 @@ import { initPrimarySubmenus } from './primary-submenus.js';
 import { initFeaturedProducts } from './featured-products.js';
 import { initHeaderScroll } from './header-scroll.js';
 import { initProductGallery } from './product-gallery.js';
+import { initHomeHero } from './home-hero.js';
 
 const lenis = initSmoothScroll();
 
@@ -15,3 +16,4 @@ initMobileMenu(lenis);
 initFeaturedProducts();
 initHeaderScroll();
 initProductGallery();
+initHomeHero(lenis);
