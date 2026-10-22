@@ -9,6 +9,9 @@ import { initHeaderScroll } from './header-scroll.js';
 import { initProductGallery } from './product-gallery.js';
 import { initHomeHero } from './home-hero.js';
 import { initHomePersonalized } from './home-personalized.js';
+import { initHomeServiceStrip } from './home-service-strip.js';
+import { initHomeSectionReveals } from './home-section-reveals.js';
+import { initHomeScrollRibbon } from './home-scroll-ribbon.js';
 
 const lenis = initSmoothScroll();
 
@@ -19,3 +22,6 @@ initHeaderScroll();
 initProductGallery();
 initHomeHero(lenis);
 initHomePersonalized();
+initHomeServiceStrip();
+initHomeSectionReveals();
+initHomeScrollRibbon();

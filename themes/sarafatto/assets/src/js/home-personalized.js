@@ -6,48 +6,46 @@ gsap.registerPlugin(ScrollTrigger);
 /** Animate the Home customisation ribbon and image in response to scroll. */
 export function initHomePersonalized() {
   const section = document.querySelector('.site-main--home .home-personalized');
+  const stage = section?.querySelector('.home-personalized__stage');
   const ribbon = section?.querySelector('[data-personalized-ribbon-track]');
+  const ribbonPaths = Array.from(section?.querySelectorAll('[data-personalized-ribbon-path]') || []);
   const image = section?.querySelector('.home-personalized__image');
 
-  if (!section || !ribbon || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+  if (!section || !stage || !ribbon || ribbonPaths.length === 0 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
 
   const media = gsap.matchMedia();
   media.add('(prefers-reduced-motion: no-preference)', () => {
     const isMobile = window.matchMedia('(max-width: 47.999rem)').matches;
-    const startX = isMobile ? -28 : -48;
+    ribbonPaths.forEach((path) => {
+      const pathLength = path.getTotalLength();
+      gsap.set(path, { strokeDasharray: pathLength, strokeDashoffset: pathLength });
+    });
 
     gsap.set(ribbon, { transformOrigin: 'left center' });
 
     const timeline = gsap.timeline({
       scrollTrigger: {
-        trigger: section,
-        start: 'top 82%',
-        end: 'bottom 28%',
-        scrub: 0.65,
+        trigger: stage,
+        start: 'center center',
+        end: '+=720',
+        scrub: true,
+        pin: stage,
+        anticipatePin: 1,
         invalidateOnRefresh: true,
       },
     });
 
+    timeline.to(ribbonPaths, { strokeDashoffset: 0, duration: 0.9, ease: 'none' }, 0);
     timeline.fromTo(ribbon, {
-      xPercent: startX,
-      scaleX: 0.76,
-      scaleY: 0.9,
-      rotation: isMobile ? -1.5 : -2.5,
+      scaleX: isMobile ? 0.985 : 0.96,
+      scaleY: 0.97,
     }, {
-      xPercent: 0,
-      scaleX: 1.06,
-      scaleY: 1.02,
-      rotation: 0,
-      duration: 0.78,
-      ease: 'power2.out',
-    });
-
-    timeline.to(ribbon, {
-      scaleX: 1,
+      scaleX: 1.025,
       scaleY: 1,
-      duration: 0.22,
-      ease: 'elastic.out(1, 0.72)',
-    });
+      duration: 0.86,
+      ease: 'none',
+    }, 0);
+    timeline.to(ribbon, { scaleX: 1, duration: 0.14, ease: 'none' }, 0.86);
 
     if (image) {
       timeline.fromTo(image, {

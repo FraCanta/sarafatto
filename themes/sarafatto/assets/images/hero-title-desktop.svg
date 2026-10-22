@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-hidden="true">
+  <g font-family="Jost, Arial, sans-serif" font-weight="700" fill="#1A1A1A">
+    <!-- LEFT TITLE -->
+    <g transform="translate(110 185) rotate(-1.5)">
+      <text x="0" y="0" font-size="84">Non sai</text>
+      <text x="34" y="86" font-size="84">come <tspan fill="#FFC942">dirlo?</tspan></text>
+
+      <!-- yellow doodles -->
+      <path d="M430 -38 L448 -77" fill="none" stroke="#FFC942" stroke-width="8" stroke-linecap="round"/>
+      <path d="M470 -26 L498 -62" fill="none" stroke="#FFC942" stroke-width="8" stroke-linecap="round"/>
+      <path d="M502 4 L540 -12" fill="none" stroke="#FFC942" stroke-width="8" stroke-linecap="round"/>
+    </g>
+
+    <!-- RIGHT TITLE -->
+    <g transform="translate(1040 185) rotate(1)">
+      <text x="0" y="0" font-size="82">Fallo con</text>
+      <text x="-6" y="88" font-size="82">la frase <tspan fill="#E91E8E">giusta!</tspan></text>
+
+      <!-- pink doodles -->
+      <path d="M500 -16 L516 -52" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+      <path d="M534 -5 L564 -35" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+      <path d="M565 22 L603 10" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- decorative curves -->
+  <path d="M0 330 C130 300, 170 410, 315 405 C420 402, 455 332, 560 350 C610 358, 626 384, 611 410 C598 432, 569 434, 560 418 C549 398, 574 380, 608 390"
+        fill="none" stroke="#FFC942" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M1060 360 C1170 335, 1230 325, 1315 345 C1398 364, 1465 400, 1530 382 C1570 371, 1592 345, 1600 330"
+        fill="none" stroke="#E91E8E" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

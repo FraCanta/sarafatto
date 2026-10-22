@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1400" role="img" aria-hidden="true">
+  <g font-family="Jost, Arial, sans-serif" font-weight="700">
+
+    <!-- titolo 1 -->
+    <g transform="translate(118 210)">
+      <text x="0" y="0" font-size="92" fill="#171717">Non sai</text>
+      <text x="0" y="102" font-size="92" fill="#171717">
+        come <tspan fill="#F3BC32">dirlo?</tspan>
+      </text>
+
+      <!-- doodle gialli -->
+      <path d="M540 -22 L558 -64" fill="none" stroke="#F3BC32" stroke-width="8" stroke-linecap="round"/>
+      <path d="M578 -10 L608 -46" fill="none" stroke="#F3BC32" stroke-width="8" stroke-linecap="round"/>
+      <path d="M614 20 L652 4" fill="none" stroke="#F3BC32" stroke-width="8" stroke-linecap="round"/>
+    </g>
+
+    <!-- curva gialla -->
+    <path d="M22 392
+             C130 360, 220 432, 340 425
+             C430 420, 505 360, 610 366
+             C664 369, 690 392, 676 422
+             C664 446, 630 448, 618 430
+             C603 409, 626 388, 662 398"
+          fill="none" stroke="#F3BC32" stroke-width="7"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- titolo 2 -->
+    <g transform="translate(122 560)">
+      <text x="0" y="0" font-size="88" fill="#171717">Fallo con</text>
+      <text x="0" y="98" font-size="88" fill="#171717">
+        la frase <tspan fill="#E91E8E">giusta!</tspan>
+      </text>
+
+      <!-- doodle rosa, tenuti fuori dalla parola -->
+      <path d="M655 0 L670 -36" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+      <path d="M690 8 L720 -20" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+      <path d="M726 34 L766 22" fill="none" stroke="#E91E8E" stroke-width="8" stroke-linecap="round"/>
+    </g>
+
+    <!-- curva rosa abbassata e con ricciolo spostato a destra -->
+    <path d="M62 730
+             C170 700, 272 694, 372 710
+             C468 726, 552 756, 640 758
+             C690 760, 735 748, 770 724
+             C802 702, 818 676, 808 658
+             C798 640, 770 644, 758 662
+             C744 682, 759 705, 792 710
+             C832 716, 860 700, 892 670"
+          fill="none" stroke="#E91E8E" stroke-width="7"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
