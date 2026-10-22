@@ -1,0 +1,28 @@
+{
+  "assets/fonts/jost/jost-latin-ext-wght-normal.woff2": {
+    "file": "assets/jost-latin-ext-wght-normal-BDUtSsKd.woff2",
+    "src": "assets/fonts/jost/jost-latin-ext-wght-normal.woff2"
+  },
+  "assets/fonts/jost/jost-latin-wght-normal.woff2": {
+    "file": "assets/jost-latin-wght-normal-ObQm3Zd1.woff2",
+    "src": "assets/fonts/jost/jost-latin-wght-normal.woff2"
+  },
+  "assets/images/hero-home-background.png": {
+    "file": "assets/hero-home-background-DoEvax74.png",
+    "src": "assets/images/hero-home-background.png"
+  },
+  "assets/src/js/app.js": {
+    "file": "assets/app-YvV3mBr7.js",
+    "name": "app",
+    "src": "assets/src/js/app.js",
+    "isEntry": true,
+    "css": [
+      "assets/app-mVj8fugX.css"
+    ],
+    "assets": [
+      "assets/jost-latin-wght-normal-ObQm3Zd1.woff2",
+      "assets/jost-latin-ext-wght-normal-BDUtSsKd.woff2",
+      "assets/hero-home-background-DoEvax74.png"
+    ]
+  }
+}

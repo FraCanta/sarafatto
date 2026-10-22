@@ -6762,3 +6762,80 @@ body.home .site-header[data-hero-scroll-active] .custom-logo,
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Home personalised section: soft ribbon framing the existing product photo. */
+.site-main--home .home-personalized {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: #fbfaf7;
+}
+
+.site-main--home .home-personalized__inner {
+  position: relative;
+  z-index: 1;
+}
+
+.site-main--home .home-personalized__media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: visible;
+}
+
+.site-main--home .home-personalized__image,
+.site-main--home .home-personalized__placeholder {
+  position: relative;
+  z-index: 1;
+}
+
+.site-main--home .home-personalized__image {
+  display: block;
+  object-fit: cover;
+}
+
+.site-main--home .home-personalized__ribbon {
+  position: absolute;
+  z-index: 2;
+  inset: -2%;
+  width: 104%;
+  height: 104%;
+  overflow: visible;
+  pointer-events: none;
+  filter: drop-shadow(0 0.45rem 0.8rem rgb(21 91 87 / 12%));
+}
+
+.site-main--home .home-personalized__ribbon-highlight {
+  fill: none;
+  stroke: rgb(255 255 255 / 48%);
+  stroke-linecap: round;
+  stroke-width: 10;
+}
+
+@media (max-width: 63.999rem) {
+  .site-main--home .home-personalized__media {
+    aspect-ratio: 16 / 9;
+  }
+}
+
+@media (max-width: 47.999rem) {
+  .site-main--home .home-personalized__media {
+    aspect-ratio: 16 / 9;
+  }
+
+  .site-main--home .home-personalized__ribbon {
+    inset: -1% -3%;
+    width: 106%;
+    height: 102%;
+    filter: drop-shadow(0 0.3rem 0.55rem rgb(21 91 87 / 10%));
+  }
+
+  .site-main--home .home-personalized__ribbon-highlight {
+    stroke-width: 8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-main--home .home-personalized__image {
+    transform: none !important;
+  }
+}

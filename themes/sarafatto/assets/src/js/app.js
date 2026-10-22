@@ -8,6 +8,7 @@ import { initFeaturedProducts } from './featured-products.js';
 import { initHeaderScroll } from './header-scroll.js';
 import { initProductGallery } from './product-gallery.js';
 import { initHomeHero } from './home-hero.js';
+import { initHomePersonalized } from './home-personalized.js';
 
 const lenis = initSmoothScroll();
 
@@ -17,3 +18,4 @@ initFeaturedProducts();
 initHeaderScroll();
 initProductGallery();
 initHomeHero(lenis);
+initHomePersonalized();
