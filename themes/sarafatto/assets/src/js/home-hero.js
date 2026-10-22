@@ -134,7 +134,7 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
         ? { pin: 0.7, finalWidth: 0.84, finalHeight: 0.96, titleScale: 0.82, visualScale: 0.95 }
         : tablet
           ? { pin: 0.58, finalWidth: 0.88, finalHeight: 0.97, titleScale: 0.88, visualScale: 0.96 }
-          : { pin: 0.42, finalWidth: null, finalHeight: 0.92, titleScale: 0.9, visualScale: 0.98 };
+          : { pin: 0.42, finalWidth: null, finalHeight: 0.92, titleScale: 0.9 };
 
       const initialRadius = Number.parseFloat(getComputedStyle(hero).borderTopLeftRadius) || 28;
       const pinTarget = hero.closest('.home-hero-scroll-frame') || hero;
@@ -187,6 +187,10 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
       const cardEnd = mobile ? 0.58 : 0.7;
       const visualEnd = mobile ? 0.65 : 0.75;
       const viewportWidth = () => document.documentElement.clientWidth;
+      const heroViewportGap = () => (
+        Number.parseFloat(getComputedStyle(hero).marginTop) || 0
+      );
+      const heroStartWidth = () => `${viewportWidth() - heroViewportGap() * 2}px`;
       const rootFontSize = () => Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
       const desktopHeroWidth = (ratio) => Math.min(viewportWidth() * ratio, 112 * rootFontSize());
 
@@ -199,7 +203,7 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
 
       if (mobile) {
         timeline.fromTo(hero, {
-          width: () => `${viewportWidth() - rootFontSize() * 2}px`,
+          width: heroStartWidth,
         }, {
           width: () => `${viewportWidth() - rootFontSize() * 3}px`,
           scaleY: profile.finalHeight,
@@ -208,7 +212,7 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
         }, cardStart);
       } else {
         timeline.fromTo(hero, {
-          width: () => `${desktopHeroWidth(0.94)}px`,
+          width: heroStartWidth,
         }, {
           width: () => `${desktopHeroWidth(profile.finalWidth)}px`,
           scaleY: profile.finalHeight,
@@ -217,11 +221,13 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
         }, cardStart);
       }
 
-      timeline.to(visual, {
-        scale: profile.visualScale,
-        y: mobile ? 2 : 5,
-        duration: visualEnd - 0.35,
-      }, 0.35);
+      if (!mobile) {
+        timeline.to(visual, {
+          scale: profile.visualScale,
+          y: 5,
+          duration: visualEnd - 0.35,
+        }, 0.35);
+      }
 
       timeline.fromTo(header, {
         y: mobile ? -6 : -10,
