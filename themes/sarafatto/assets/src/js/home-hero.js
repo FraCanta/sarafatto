@@ -204,9 +204,10 @@ function initHomeHeroScroll({ hero, title, visual, lenis }) {
       if (mobile) {
         timeline.fromTo(hero, {
           width: heroStartWidth,
+          minHeight: () => `${hero.getBoundingClientRect().height}px`,
         }, {
           width: () => `${viewportWidth() - rootFontSize() * 3}px`,
-          scaleY: profile.finalHeight,
+          minHeight: () => `${Math.round(hero.getBoundingClientRect().height * profile.finalHeight)}px`,
           borderRadius: `${initialRadius + 7}px`,
           duration: cardEnd - cardStart,
         }, cardStart);

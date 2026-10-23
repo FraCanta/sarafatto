@@ -12,6 +12,7 @@ import { initHomePersonalized } from './home-personalized.js';
 import { initHomeServiceStrip } from './home-service-strip.js';
 import { initHomeSectionReveals } from './home-section-reveals.js';
 import { initHomeScrollRibbon } from './home-scroll-ribbon.js';
+import { initProductArchiveHero } from './product-archive-hero.js';
 
 const lenis = initSmoothScroll();
 
@@ -25,3 +26,4 @@ initHomePersonalized();
 initHomeServiceStrip();
 initHomeSectionReveals();
 initHomeScrollRibbon();
+initProductArchiveHero(lenis);
