@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout commit selezionato
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release_sha }}
           persist-credentials: false
@@ -53,12 +53,12 @@ jobs:
           [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo 'Inserire uno SHA completo valido.' >&2; exit 1; }
           [[ "$RELEASE_SHA" == "$GITHUB_SHA" ]] || { echo 'Lo SHA inserito non coincide con il commit autorizzato del dispatch.' >&2; exit 1; }
       - name: Checkout commit autorizzato
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release_sha }}
           persist-credentials: false
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -88,7 +88,7 @@ jobs:
           cp -a themes/sarafatto/assets/dist/. "$dist/"
           node scripts/deploy/verify-vite-manifest.mjs --package "$PACKAGE_DIR" --inventory "$RUNNER_TEMP/sarafatto-inventory.tsv" --release-sha "$GITHUB_SHA"
       - name: Carica artefatto di sola anteprima
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sarafatto-release-${{ github.sha }}
           path: |
@@ -104,12 +104,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout strumenti di confronto
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release_sha }}
           persist-credentials: false
       - name: Scarica artefatto verificato
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sarafatto-release-${{ github.sha }}
           path: ${{ runner.temp }}/sarafatto-artifact
