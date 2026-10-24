@@ -104,3 +104,68 @@ Per adottare un sito già allineato non serve pubblicare nuovamente i 160 file. 
 scripts/deploy/test_baseline_tool.py copre il confronto e l'inizializzazione su fixture locali, inclusi cambiamenti successivi al candidato (contenuto, file mancante, extra, symlink e permessi), inventario obsoleto non accettato, script inventario non corrispondente al commit, lock occupato, baseline già esistente e fallimento dell'acquisizione. scripts/deploy/test-baseline-inventory-fixture.sh prova l'inventario effettivo con symlink npm e symlink gestito. Il job `validate` esegue test e fixture senza Secrets o SSH; imposta `SARAFATTO_REQUIRE_FLOCK=1`, perciò fallisce se `flock` manca o se un test risulta saltato.
 
 Per il primo test GitHub: selezionare main e lo SHA completo; lasciare run_remote_dry_run disattivato. Si eseguono validate e build-artifact, non si acquisisce inventario remoto e non si scrive alcuna baseline. La verifica remota read-only e l'eventuale inizializzazione privata richiederanno un job o una procedura separata, da approvare prima dell'implementazione. Nessun job di deploy è previsto in questa fase.
+
+## Fase 3C — backup applicativo verificato e restore-test
+
+Questa fase aggiunge strumenti locali per la futura esecuzione controllata su IONOS. Il workflow GitHub esegue soltanto sintassi e fixture locali: non invoca i comandi `backup`, `verify` o `restore-test`, non usa Secrets per questi test, non crea backup remoti e non ripristina file pubblici. Non è implementato un restore reale.
+
+### Perimetro e preflight
+
+Il backup legge soltanto `themes/sarafatto/`, `plugins/sarafatto-core/` e il MU plugin `mu-plugins/sarafatto-polylang-front-page-url.php`, includendo i file extra registrati nella baseline. L'unica esclusione è `themes/sarafatto/node_modules/`. Un file nuovo non presente nella baseline, un file mancante o una differenza di hash, dimensione o permessi blocca l'operazione. I symlink nei percorsi gestiti bloccano sempre. Il tool verifica marker, proprietario e permessi dell'area privata e SHA-256/schema della baseline.
+
+Backup, verifica e simulazione usano il lock POSIX esclusivo persistente `/home/www/sarafatto-deploy/locks/site-operation.lock`; l'inizializzazione baseline usa lo stesso file e le future operazioni di deploy dovranno acquisire lo stesso lock. Per backup e restore-test le directory `state`, `locks`, `backups` e `staging` vengono aperte con descriptor POSIX (`O_DIRECTORY|O_NOFOLLOW`); creazione, scrittura dei manifest, estrazione e finalizzazione operano relativamente ai descriptor, verificando anche che i nomi siano ancora associati agli inode aperti. Una sostituzione con symlink rilevata ai punti di controllo blocca l'operazione e non reindirizza le scritture al target del link.
+
+Limite residuo: un processo concorrente con lo stesso UID può rinominare una directory privata già aperta fuori dalla root mentre il processo la usa. I descriptor continuerebbero a riferirsi allo stesso inode; nessuna primitiva POSIX usata qui impedisce a un altro processo dello stesso account di rinominarlo. I controlli rilevano le sostituzioni osservabili, ma non chiudono atomicamente questa finestra contro processi non cooperanti dello stesso UID. Il lock coordina solo gli strumenti che seguono il protocollo. Prima dell'uso operativo, evitare processi concorrenti non coordinati e verificare l'account e i permessi effettivi IONOS.
+
+Il sistema calcola lo spazio su disco con `statvfs`/`shutil.disk_usage`, ma questo non rivela necessariamente la quota effettiva Ceph/IONOS. Prima di ogni backup occorre controllare manualmente la quota residua nell'account IONOS e fornire al comando il valore in byte verificato. Il preflight richiede almeno due volte la dimensione dei file più un margine del 5% (minimo 16 MiB), per coprire archivio, restore-test e margine operativo. Un valore non disponibile o insufficiente blocca il backup. Non equivale a una lettura automatica della quota: va verificato con accuratezza e aggiornato al momento dell'operazione.
+
+### Formato e finalizzazione
+
+Ogni snapshot ha un ID UTC univoco e viene preparato in `/home/www/sarafatto-deploy/backups/.incomplete-<id>-<nonce>/`. Il formato contiene `payload.tar.gz` con i file ai percorsi relativi originari, `manifest.json`, `manifest.sha256` e infine `COMPLETE`. Il manifest include versione schema, ID e timestamp UTC, commit e SHA della baseline, perimetro/esclusione, elenco file con SHA-256, dimensione, permessi e classificazione, oltre a dimensione e SHA-256 dell'archivio. Il marker `COMPLETE` lega lo snapshot al digest del manifest.
+
+Il TAR viene verificato prima della finalizzazione: solo file regolari, percorsi allowlistati, niente symlink o file speciali, nessun duplicato, e corrispondenza di contenuti e permessi. Archivio, manifest e marker sono creati con `openat`/`O_EXCL|O_NOFOLLOW` relativi al descriptor della directory temporanea. Il backup temporaneo riceve `COMPLETE` soltanto dopo la verifica; viene poi rinominato nella directory `backups` ancorata tramite `renameat2(RENAME_NOREPLACE)` e `fsync` del descriptor. Il tool fallisce chiuso se le primitive POSIX richieste mancano. Directory `.incomplete-*`, file temporanei e vecchi backup non vengono cancellati automaticamente.
+
+Il digest del manifest stampato alla creazione va conservato indipendentemente dal backup. I comandi `verify` e `restore-test` richiedono quel digest e lo confrontano, oltre a ricontrollare la baseline, il manifest, l'archivio e ogni membro. I digest interni rilevano corruzioni; la copia indipendente del digest permette di rilevare anche la sostituzione coordinata di archivio e manifest nella directory privata.
+
+### Comandi operativi (da eseguire solo dopo l'approvazione)
+
+Elenco read-only: distingue directory incomplete/anomale da backup autoconsistenti. Per dichiarare verificato un backup occorre anche il comando `verify` con digest del manifest conservato indipendentemente:
+
+~~~bash
+python3 /home/www/sarafatto-repo/scripts/deploy/backup_tool.py list
+~~~
+
+Creazione: il valore seguente è la quota libera **verificata manualmente**, espressa in byte. Il comando stampa un ID e il digest del manifest; registrare entrambi:
+
+~~~bash
+python3 /home/www/sarafatto-repo/scripts/deploy/backup_tool.py backup \
+  --baseline-sha256 '07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd' \
+  --account-quota-free-bytes 'BYTE_QUOTA_CONFERMATA'
+~~~
+
+Verifica read-only di un backup specifico; sostituire ID e digest con i valori restituiti alla creazione:
+
+~~~bash
+python3 /home/www/sarafatto-repo/scripts/deploy/backup_tool.py verify \
+  --backup-id 'ID_BACKUP' \
+  --baseline-sha256 '07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd' \
+  --manifest-sha256 'SHA256_MANIFEST_REGISTRATO'
+~~~
+
+Restore-test: crea una nuova directory privata sotto `staging/`, verifica prima il backup e poi i file estratti. Non accetta una destinazione fornita dall'operatore, non scrive nella webroot e non rimuove prove precedenti:
+
+~~~bash
+python3 /home/www/sarafatto-repo/scripts/deploy/backup_tool.py restore-test \
+  --backup-id 'ID_BACKUP' \
+  --baseline-sha256 '07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd' \
+  --manifest-sha256 'SHA256_MANIFEST_REGISTRATO' \
+  --account-quota-free-bytes 'BYTE_QUOTA_CONFERMATA'
+~~~
+
+Un backup valido contiene tutti e quattro gli elementi previsti e passa `verify`. Un `.incomplete-*`, un `COMPLETE` assente, un checksum mancante, un TAR troncato o qualsiasi anomalia risultano incompleti/invalidi e non sono selezionabili dal restore-test. Non correggere o cancellare automaticamente tali directory: conservarle per l'analisi e decidere manualmente come procedere.
+
+### Limiti
+
+Questi sono backup dei soli componenti applicativi del progetto; non includono database, `uploads`, `wp-config.php`, plugin di terze parti o temi esterni e non sostituiscono un backup WordPress completo. `restore-test` dimostra che lo snapshot è leggibile e riproducibile in staging; non implementa il ripristino in produzione né attesta da solo la recuperabilità dell'intero sito. Non vengono eliminati backup vecchi e non viene usato `rsync --delete`.
+
+I test in `scripts/deploy/test_backup_tool.py` coprono anche otto bundle Vite precedenti e `home-hero.php.bak`: tutti e nove sono acquisiti dal contenuto della baseline, verificati nel manifest/archivio e recuperati nel restore-test; modifica o assenza di ciascun extra blocca il backup. Altri test sostituiscono `backups` e `staging` con symlink dopo l'apertura dei descriptor e verificano il fallimento chiuso senza scritture nel target. Le fixture Bash si eseguono nel job `validate` su Ubuntu. Con `SARAFATTO_REQUIRE_FLOCK=1`, CI fallisce se `flock` non è disponibile o se un test viene saltato. I test usano esclusivamente directory temporanee locali e non accedono a IONOS.

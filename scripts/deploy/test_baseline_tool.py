@@ -267,7 +267,7 @@ class BaselineToolTests(unittest.TestCase):
     def test_occupied_lock_blocks_initialization(self):
         candidate, approved_hash = self.approved_candidate()
         private_root = self.make_private_root(self.root / "private-locked")
-        lock_path = private_root / "locks" / "baseline-initialization.lock"
+        lock_path = private_root / "locks" / "site-operation.lock"
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:

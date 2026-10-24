@@ -69,9 +69,13 @@ def parse_artifact(filename):
 
 
 def parse_remote(filename):
+    return parse_remote_text(pathlib.Path(filename).read_text(encoding="utf-8"))
+
+
+def parse_remote_text(text):
     files, symlinks, exclusion_record = {}, [], None
     ended = False
-    for number, line in enumerate(pathlib.Path(filename).read_text(encoding="utf-8").splitlines(), 1):
+    for number, line in enumerate(text.splitlines(), 1):
         fields = line.split("\t")
         if fields == ["END"]:
             if ended:
@@ -282,14 +286,16 @@ def validate_private_state(private_root, expected_root):
     return private_root / "state", private_root / "locks"
 
 
-def acquire_baseline_lock(locks_dir):
+def acquire_baseline_lock(locks_dir, directory_fd=None):
     """Acquisisce un flock non bloccante su un file persistente nell'area privata."""
     if fcntl is None:
         raise BaselineError("flock non è disponibile: inizializzazione impossibile.")
-    lock = locks_dir / "baseline-initialization.lock"
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
-        lock_fd = os.open(lock, flags, 0o600)
+        if directory_fd is None:
+            lock_fd = os.open(pathlib.Path(locks_dir) / "site-operation.lock", flags, 0o600)
+        else:
+            lock_fd = os.open("site-operation.lock", flags, 0o600, dir_fd=directory_fd)
     except OSError as exc:
         raise BaselineError("Impossibile aprire in sicurezza il lock privato.") from exc
     info = os.fstat(lock_fd)

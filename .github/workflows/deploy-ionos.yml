@@ -46,8 +46,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py")]'
+          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py")]'
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
+          SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_backup_tool.py
           bash scripts/deploy/test-preview-fixtures.sh
           bash scripts/deploy/test-baseline-inventory-fixture.sh
 
