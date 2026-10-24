@@ -28,6 +28,13 @@ const requiredEntries = [
 const distDir = path.join(packageDir, 'themes/sarafatto/assets/dist');
 const manifestPath = path.join(distDir, '.vite/manifest.json');
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+const nodeModulesPath = path.join(packageDir, 'themes/sarafatto/node_modules');
+try {
+  await lstat(nodeModulesPath);
+  throw new Error('node_modules non deve essere incluso nell\'artefatto di rilascio.');
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 
 function safeRelative(value) {
   if (typeof value !== 'string' || !value || value.includes('\\') || value.startsWith('/')) {

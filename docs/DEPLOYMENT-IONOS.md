@@ -6,7 +6,9 @@ Questa fase prepara e confronta una release, ma non pubblica file. Il workflow h
 
 Il pacchetto comprende `themes/sarafatto/`, `plugins/sarafatto-core/` e il solo `mu-plugins/sarafatto-polylang-front-page-url.php`. Viene creato da `git archive` sul commit autorizzato, quindi non include modifiche locali non committate, `uploads`, plugin o temi non allowlisted, configurazioni o file `.env`. La build Vite sostituisce soltanto `themes/sarafatto/assets/dist` nell'artefatto temporaneo.
 
-Sul server vengono letti esclusivamente `/home/www/public/wp-content/themes/sarafatto`, `plugins/sarafatto-core` e il singolo MU plugin elencato. Lo script acquisisce hash e inventario; tre invocazioni `rsync` usano sempre `--dry-run`, senza `--delete`. Non viene eseguito `git pull`, né alcuna scrittura in `/home/www/public`.
+Sul server vengono letti esclusivamente `/home/www/public/wp-content/themes/sarafatto`, `plugins/sarafatto-core` e il singolo MU plugin elencato. La sola esclusione interna al tema è `themes/sarafatto/node_modules/`: è una directory di dipendenze di sviluppo npm, non inclusa in `git archive` e non necessaria alla build distribuita. L'inventario ne riporta soltanto i conteggi di file e symlink; il confronto SHA-256, il controllo bloccante dei symlink e `rsync` non la attraversano. Il validatore rifiuta l'artefatto se `node_modules` compare nel pacchetto. Non vengono escluse altre directory per nome: cache o contenuti aggiuntivi nell'allowlist restano visibili nel confronto e vanno classificati, mai eliminati automaticamente.
+
+Lo script acquisisce hash e inventario; tre invocazioni `rsync` usano sempre `--dry-run`, senza `--delete`. Il report riassume i contenuti extra sul server e ne dettaglia al massimo 20 per categoria; vecchi bundle Vite e backup sono esplicitamente segnalati come conservati. Non viene eseguito `git pull`, né alcuna scrittura in `/home/www/public`.
 
 ## Configurazione repository GitHub
 
@@ -25,9 +27,9 @@ La chiave privata non è letta o generata da questo workflow. Poiché SSH usa `B
 
 ## Avvio e interpretazione
 
-Da Actions avviare **IONOS deployment preview** sul branch `main` e inserire lo SHA completo del commit selezionato. Il workflow si arresta se branch, SHA o build non coincidono, se il manifest o un asset manca, se l'artefatto esce dall'allowlist, se vi sono symlink nelle directory remote autorizzate o se SSH/rsync fallisce.
+Da Actions avviare **IONOS deployment preview** sul branch `main` e inserire lo SHA completo del commit selezionato. Il workflow si arresta se branch, SHA o build non coincidono, se il manifest o un asset manca, se l'artefatto esce dall'allowlist, se vi sono symlink nei percorsi gestiti (escluso soltanto `themes/sarafatto/node_modules/`) o se SSH/rsync fallisce. La validazione esegue fixture locali su runner Ubuntu per verificare l'esclusione npm, il blocco di un symlink gestito, la classificazione degli hash e la conservazione degli extra.
 
-Il riepilogo del job riporta file nuovi, modificati, invariati, presenti soltanto in produzione (mai eliminati), drift dalla baseline e righe `rsync --dry-run`. In assenza di `/home/www/sarafatto-deploy/state/production-inventory.tsv` non è possibile distinguere modifiche manuali da divergenze di release. Questa fase non crea tale baseline.
+Il riepilogo del job riporta conteggi e dettagli limitati di file nuovi, modificati, invariati e presenti soltanto in produzione (mai eliminati), conteggi sintetici di `node_modules`, drift dalla baseline e righe `rsync --dry-run`. In assenza di `/home/www/sarafatto-deploy/state/production-inventory.tsv` non è possibile verificare l'assenza di modifiche manuali o distinguere tali modifiche da divergenze di release. Questa fase non crea tale baseline.
 
 ## Seguito del progetto
 

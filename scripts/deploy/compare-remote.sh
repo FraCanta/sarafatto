@@ -28,78 +28,26 @@ ssh_opts=(-i "$SSH_KEY_FILE" -p "$IONOS_SSH_PORT" -o BatchMode=yes -o Identities
 tmp=$(mktemp -d)
 
 ssh "${ssh_opts[@]}" "$destination" 'bash -s' < scripts/deploy/remote-inventory.sh > "$tmp/remote.tsv"
-python3 - "$LOCAL_INVENTORY" "$tmp/remote.tsv" "$GITHUB_STEP_SUMMARY" "$RELEASE_SHA" <<'PY'
-import pathlib, sys
-
-local_path, remote_path, summary_path = map(pathlib.Path, sys.argv[1:4])
-release_sha = sys.argv[4]
-rows = local_path.read_text().splitlines()
-desired = {}
-for row in rows:
-    parts = row.split("\t", 2)
-    if len(parts) != 3 or parts[2] in desired:
-        raise SystemExit("Inventario locale malformato o duplicato.")
-    desired[parts[2]] = (parts[0], parts[1])
-
-remote = {}
-baseline = {}
-symlinks = []
-baseline_state = "absent"
-in_baseline = False
-for row in remote_path.read_text().splitlines():
-    if row == "BASELINE_BEGIN":
-        in_baseline = True
-        continue
-    if row == "BASELINE_END":
-        in_baseline = False
-        continue
-    fields = row.split("\t", 3)
-    if in_baseline:
-        if len(fields) != 3:
-            raise SystemExit("Inventario baseline remoto malformato.")
-        baseline[fields[2]] = (fields[0], fields[1])
-    elif fields[0] == "BASELINE" and len(fields) == 2:
-        baseline_state = fields[1]
-    elif fields[0] == "SYMLINK" and len(fields) == 2:
-        symlinks.append(fields[1])
-    elif fields[0] == "FILE" and len(fields) == 4:
-        remote[fields[3]] = (fields[1], fields[2])
-
-if baseline_state == "available" and not baseline:
-    raise SystemExit("Baseline dichiarata presente ma vuota/non valida; confronto interrotto.")
-new = sorted(desired.keys() - remote.keys())
-modified = sorted(p for p in desired.keys() & remote.keys() if desired[p] != remote[p])
-unchanged = sorted(p for p in desired.keys() & remote.keys() if desired[p] == remote[p])
-remote_only = sorted(remote.keys() - desired.keys())
-manual_drift = sorted(p for p in remote.keys() | baseline.keys() if remote.get(p) != baseline.get(p)) if baseline_state == "available" else []
-
-def section(title, paths):
-    lines = [f"### {title}", ""]
-    lines.extend(f"- `{p}`" for p in paths) if paths else lines.append("- Nessuno")
-    return "\n".join(lines)
-
-text = [f"# Anteprima rilascio `{release_sha}`", "", "Confronto in sola lettura; non è stata eseguita alcuna scrittura remota.", "",
-        f"Baseline remota: **{baseline_state}**", "",
-        section("Nuovi file", new), "", section("Modificati rispetto all'artefatto", modified), "",
-        section("Invariati", unchanged), "", section("Solo in produzione (conservati)", remote_only), "",
-        section("Drift dalla baseline", manual_drift), "", section("Symlink remoti", sorted(symlinks))]
-if baseline_state != "available":
-    text += ["", "Senza baseline approvata non è possibile distinguere modifiche manuali in produzione da differenze di release."]
-summary_path.write_text("\n".join(text) + "\n")
-PY
-
-if [[ -s "$tmp/remote.tsv" ]] && grep -q '^SYMLINK' "$tmp/remote.tsv"; then die 'Symlink presenti nelle directory allowlist: dry-run rsync bloccato.'; fi
+if python3 scripts/deploy/preview-report.py "$LOCAL_INVENTORY" "$tmp/remote.tsv" "$GITHUB_STEP_SUMMARY" "$RELEASE_SHA"; then
+  :
+else
+  status=$?
+  if (( status == 3 )); then die 'Symlink presenti nel perimetro gestito; dry-run rsync bloccato.'; fi
+  die "Confronto inventari fallito (codice $status)."
+fi
 
 rsync_dry_run() {
-  local source=$1 target=$2
-  rsync --archive --checksum --dry-run --itemize-changes --safe-links --out-format='%i %n%L' \
+  local source=$1 target=$2 exclude_node_modules=${3:-0}
+  local options=(--archive --checksum --dry-run --itemize-changes --safe-links --out-format='%i %n%L')
+  if (( exclude_node_modules == 1 )); then options+=(--exclude='/node_modules/'); fi
+  rsync "${options[@]}" \
     -e "ssh -i $SSH_KEY_FILE -p $IONOS_SSH_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS_FILE" \
     "$source" "$destination:$target"
 }
 
 {
   printf '\n### rsync --dry-run (nessuna scrittura)\n\n```text\n'
-  rsync_dry_run "$PACKAGE_DIR/themes/sarafatto/" "$remote_root/themes/sarafatto/"
+  rsync_dry_run "$PACKAGE_DIR/themes/sarafatto/" "$remote_root/themes/sarafatto/" 1
   rsync_dry_run "$PACKAGE_DIR/plugins/sarafatto-core/" "$remote_root/plugins/sarafatto-core/"
   rsync_dry_run "$PACKAGE_DIR/mu-plugins/sarafatto-polylang-front-page-url.php" "$remote_root/mu-plugins/sarafatto-polylang-front-page-url.php"
   printf '```\n'

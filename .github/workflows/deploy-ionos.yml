@@ -31,13 +31,23 @@ jobs:
           persist-credentials: false
       - name: Controlla sintassi Bash
         shell: bash
-        run: bash -n scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh
+        run: |
+          set -euo pipefail
+          for script in scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh scripts/deploy/test-preview-fixtures.sh; do
+            bash -n "$script"
+          done
       - name: Controlla sintassi YAML del workflow
         shell: bash
         run: ruby -e 'require "psych"; Psych.parse_file(".github/workflows/deploy-ionos.yml"); puts "Sintassi YAML valida."'
       - name: Controlla sintassi JavaScript
         shell: bash
         run: node --check scripts/deploy/verify-vite-manifest.mjs
+      - name: Controlla sintassi Python e fixture inventario
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/deploy/preview-report.py").read_text(encoding="utf-8"))'
+          bash scripts/deploy/test-preview-fixtures.sh
 
   build-artifact:
     needs: validate
