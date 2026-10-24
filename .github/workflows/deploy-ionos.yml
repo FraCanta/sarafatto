@@ -1,0 +1,150 @@
+name: IONOS deployment preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Commit SHA autorizzato (deve coincidere con il commit selezionato su main)
+        required: true
+        type: string
+      run_remote_dry_run:
+        description: Avvia anche il confronto SSH e rsync --dry-run (richiede i Secrets IONOS)
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ionos-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout commit selezionato
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+      - name: Controlla sintassi Bash
+        shell: bash
+        run: bash -n scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh
+      - name: Controlla sintassi YAML del workflow
+        shell: bash
+        run: ruby -e 'require "psych"; Psych.parse_file(".github/workflows/deploy-ionos.yml"); puts "Sintassi YAML valida."'
+      - name: Controlla sintassi JavaScript
+        shell: bash
+        run: node --check scripts/deploy/verify-vite-manifest.mjs
+
+  build-artifact:
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verifica branch e SHA autorizzato
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo 'Il workflow è consentito solo da main.' >&2; exit 1; }
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo 'Inserire uno SHA completo valido.' >&2; exit 1; }
+          [[ "$RELEASE_SHA" == "$GITHUB_SHA" ]] || { echo 'Lo SHA inserito non coincide con il commit autorizzato del dispatch.' >&2; exit 1; }
+      - name: Checkout commit autorizzato
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: themes/sarafatto/package-lock.json
+      - name: Crea pacchetto pulito del commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = "refs/heads/main"
+          package="$RUNNER_TEMP/sarafatto-release"
+          mkdir -p "$package"
+          git archive "$GITHUB_SHA" themes/sarafatto plugins/sarafatto-core mu-plugins/sarafatto-polylang-front-page-url.php | tar -x -C "$package"
+          echo "PACKAGE_DIR=$package" >> "$GITHUB_ENV"
+      - name: Build Vite
+        working-directory: themes/sarafatto
+        run: |
+          npm ci
+          npm run build
+      - name: Inserisce la build e verifica il manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$PACKAGE_DIR/themes/sarafatto/assets/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          cp -a themes/sarafatto/assets/dist/. "$dist/"
+          node scripts/deploy/verify-vite-manifest.mjs --package "$PACKAGE_DIR" --inventory "$RUNNER_TEMP/sarafatto-inventory.tsv" --release-sha "$GITHUB_SHA"
+      - name: Carica artefatto di sola anteprima
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: sarafatto-release-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sarafatto-release/**
+            ${{ runner.temp }}/sarafatto-inventory.tsv
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  remote-dry-run:
+    needs: [validate, build-artifact]
+    if: inputs.run_remote_dry_run == true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout strumenti di confronto
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+      - name: Scarica artefatto verificato
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: sarafatto-release-${{ github.sha }}
+          path: ${{ runner.temp }}/sarafatto-artifact
+      - name: Ricontrolla l'artefatto scaricato
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/deploy/verify-vite-manifest.mjs \
+            --package "$RUNNER_TEMP/sarafatto-artifact/sarafatto-release" \
+            --inventory "$RUNNER_TEMP/sarafatto-artifact/reverified-inventory.tsv" \
+            --release-sha "$GITHUB_SHA"
+          cmp "$RUNNER_TEMP/sarafatto-artifact/sarafatto-inventory.tsv" \
+              "$RUNNER_TEMP/sarafatto-artifact/reverified-inventory.tsv"
+      - name: Installa credenziali SSH effimere
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 "$RUNNER_TEMP/sarafatto-ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/sarafatto-ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/sarafatto-ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/sarafatto-ssh/id_ed25519" "$RUNNER_TEMP/sarafatto-ssh/known_hosts"
+      - name: Confronto remoto e rsync dry-run
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          RELEASE_SHA: ${{ github.sha }}
+          PACKAGE_DIR: ${{ runner.temp }}/sarafatto-artifact/sarafatto-release
+          LOCAL_INVENTORY: ${{ runner.temp }}/sarafatto-artifact/sarafatto-inventory.tsv
+          SSH_KEY_FILE: ${{ runner.temp }}/sarafatto-ssh/id_ed25519
+          SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/sarafatto-ssh/known_hosts
+        shell: bash
+        run: bash scripts/deploy/compare-remote.sh
