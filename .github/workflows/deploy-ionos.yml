@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh scripts/deploy/test-preview-fixtures.sh; do
+          for script in scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh scripts/deploy/test-preview-fixtures.sh scripts/deploy/init-private-environment.sh scripts/deploy/baseline-inventory.sh scripts/deploy/test-baseline-inventory-fixture.sh; do
             bash -n "$script"
           done
       - name: Controlla sintassi YAML del workflow
@@ -46,8 +46,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/deploy/preview-report.py").read_text(encoding="utf-8"))'
+          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py")]'
+          SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
           bash scripts/deploy/test-preview-fixtures.sh
+          bash scripts/deploy/test-baseline-inventory-fixture.sh
 
   build-artifact:
     needs: validate
