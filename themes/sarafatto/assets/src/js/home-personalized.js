@@ -1,7 +1,4 @@
-import { gsap } from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
-
-gsap.registerPlugin(ScrollTrigger);
+import { gsap } from './motion-runtime.js';
 
 /** Animate the Home customisation ribbon and image in response to scroll. */
 export function initHomePersonalized() {

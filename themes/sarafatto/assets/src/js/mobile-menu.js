@@ -1,3 +1,5 @@
+import { getLenisInstance } from './scroll-bridge.js';
+
 const getFocusableElements = (container) => Array.from(
   container.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
 ).filter((element) => (
@@ -74,7 +76,7 @@ const isUnmodifiedInternalLink = (event, anchor) => {
   return destination;
 };
 
-const navigateAfterClose = (destination, lenis) => {
+const navigateAfterClose = (destination) => {
   const current = new URL(window.location.href);
   const isSameDocument = (
     destination.pathname === current.pathname
@@ -93,10 +95,11 @@ const navigateAfterClose = (destination, lenis) => {
       const target = document.getElementById(id)
         || Array.from(document.getElementsByName(id))[0];
       if (target) {
+        const lenis = getLenisInstance();
         if (lenis) {
           lenis.scrollTo(target);
         } else {
-          target.scrollIntoView();
+          target.scrollIntoView({ behavior: 'smooth' });
         }
       }
     }
@@ -106,7 +109,7 @@ const navigateAfterClose = (destination, lenis) => {
   window.location.assign(destination.href);
 };
 
-export function initMobileMenu(lenis = null) {
+export function initMobileMenu() {
   const trigger = document.querySelector('.site-header__toggle');
   const panel = document.getElementById('site-navigation-panel');
   const header = trigger?.closest('.site-header');
@@ -116,6 +119,7 @@ export function initMobileMenu(lenis = null) {
   let previousOverflow = '';
   let previousPaddingRight = '';
   let scrollLocked = false;
+  let stoppedLenis = null;
   let menuState = 'closed';
   let transitionToken = 0;
   let closePromise = null;
@@ -138,7 +142,8 @@ export function initMobileMenu(lenis = null) {
     scrollLocked = true;
     previousOverflow = document.body.style.overflow;
     previousPaddingRight = document.body.style.paddingRight;
-    lenis?.stop();
+    stoppedLenis = getLenisInstance();
+    stoppedLenis?.stop();
     document.body.style.overflow = 'hidden';
     const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
     if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`;
@@ -149,7 +154,8 @@ export function initMobileMenu(lenis = null) {
     scrollLocked = false;
     document.body.style.overflow = previousOverflow;
     document.body.style.paddingRight = previousPaddingRight;
-    lenis?.start();
+    stoppedLenis?.start();
+    stoppedLenis = null;
   };
 
   const openMenu = async () => {
@@ -244,7 +250,7 @@ export function initMobileMenu(lenis = null) {
 
     event.preventDefault();
     event.stopPropagation();
-    closeMenu({ restoreFocus: false }).then(() => navigateAfterClose(destination, lenis));
+    closeMenu({ restoreFocus: false }).then(() => navigateAfterClose(destination));
   });
 
   document.addEventListener('keydown', (event) => {

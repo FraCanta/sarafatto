@@ -1,3 +1,8 @@
 node_modules/
-assets/dist/
+assets/dist/*
+!assets/dist/.vite/
+!assets/dist/assets/
+assets/dist/assets/*
+!assets/dist/assets/*.js
+!assets/dist/assets/*.css
 hot

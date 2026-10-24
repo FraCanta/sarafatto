@@ -1,19 +1,14 @@
-import { gsap } from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
-
-gsap.registerPlugin(ScrollTrigger);
+import { gsap } from './motion-runtime.js';
 
 const RESTING_CURVE = 'M0 0H1440V680 C1080 840 360 840 0 680Z';
 const SCROLLED_CURVE = 'M0 0H1440V740 C1080 590 360 590 0 740Z';
 const SETTLED_CURVE = 'M0 0H1440V740 C1080 625 360 625 0 740Z';
 
 /** Give the products archive hero edge a restrained, reversible scroll response. */
-export function initProductArchiveHero(lenis = null) {
+export function initProductArchiveHero() {
   const hero = document.querySelector('.product-archive--products [data-product-archive-hero]');
   const curve = hero?.querySelector('[data-product-archive-curve]');
   if (!hero || !curve || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
-
-  if (lenis) lenis.on('scroll', ScrollTrigger.update);
 
   // Fissa subito la forma concava iniziale prima che ScrollTrigger calcoli il progresso.
   gsap.set(curve, { attr: { d: RESTING_CURVE } });

@@ -25,6 +25,13 @@ export default defineConfig({
     outDir: 'assets/dist',
     emptyOutDir: true,
     manifest: true,
-    rollupOptions: { input: resolve(root, 'assets/src/js/app.js') },
+    rollupOptions: {
+      input: {
+        app: resolve(root, 'assets/src/js/app.js'),
+        home: resolve(root, 'assets/src/js/home.js'),
+        product: resolve(root, 'assets/src/js/product.js'),
+        productArchive: resolve(root, 'assets/src/js/product-archive.js'),
+      },
+    },
   },
 });

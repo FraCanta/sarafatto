@@ -1,7 +1,4 @@
-import { gsap } from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
-
-gsap.registerPlugin(ScrollTrigger);
+import { gsap } from './motion-runtime.js';
 
 /** Draw the Home brand ribbon in scroll progress, then gently move its text. */
 export function initHomeScrollRibbon() {

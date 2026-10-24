@@ -57,21 +57,43 @@ function sarafatto_home_hero_slides() {
 	);
 }
 
+/** Build a responsive srcset for an optimized Hero scene format. */
+function sarafatto_home_hero_responsive_srcset( $visual, $format ) {
+	if ( ! in_array( $format, array( 'avif', 'webp' ), true ) ) {
+		return '';
+	}
+
+	$base   = preg_replace( '/\.png$/i', '', $visual );
+	$widths = array( 480, 768, 1122 );
+	$srcset = array();
+
+	foreach ( $widths as $width ) {
+		$srcset[] = $base . '-' . $width . '.' . $format . ' ' . $width . 'w';
+	}
+
+	return implode( ', ', $srcset );
+}
+
 /** Render the scene-switching Home Hero. */
 function sarafatto_render_home_hero() {
 	$slides     = sarafatto_home_hero_slides();
 	$first      = $slides[0];
 	$heading    = sarafatto_theme_label( 'SaràFatto — prodotti, idee regalo e personalizzati', 'SaràFatto — products, gift ideas and personalised creations' );
 	$group_label = sarafatto_theme_label( 'Seleziona una sezione', 'Choose a section' );
+	$image_sizes = '(max-width: 47.999rem) calc(86vw - 22px), (max-width: 63.999rem) calc(48vw - 21px), min(46vw, 44rem)';
 	$markup     = '<div class="home-hero-scroll-frame"><section class="home-hero hero-slider" data-active-slide="products" aria-labelledby="home-hero-title">';
 	$markup    .= '<h1 id="home-hero-title" class="screen-reader-text">' . esc_html( $heading ) . '</h1>';
-	$markup    .= '<div class="hero-slider__stage" aria-hidden="true"><p class="hero-slider__title" data-hero-title>' . esc_html( $first['title'] ) . '</p><div class="hero-slide-visual" data-hero-visual><div class="hero-slide-visual__placeholder"></div></div></div>';
+	$markup    .= '<div class="hero-slider__stage" aria-hidden="true"><p class="hero-slider__title" data-hero-title>' . esc_html( $first['title'] ) . '</p><picture class="hero-slide-visual" data-hero-visual>';
+	$markup    .= '<source type="image/avif" srcset="' . esc_attr( sarafatto_home_hero_responsive_srcset( $first['visual'], 'avif' ) ) . '" sizes="' . esc_attr( $image_sizes ) . '" />';
+	$markup    .= '<source type="image/webp" srcset="' . esc_attr( sarafatto_home_hero_responsive_srcset( $first['visual'], 'webp' ) ) . '" sizes="' . esc_attr( $image_sizes ) . '" />';
+	$markup    .= '<img class="hero-slide-visual__image" src="' . esc_url( $first['visual'] ) . '" alt="" width="1122" height="1402" loading="eager" fetchpriority="high" decoding="async" />';
+	$markup    .= '</picture></div>';
 	$markup    .= '<div class="hero-slider__footer"><a class="hero-slider__cta" data-hero-cta href="' . esc_url( $first['ctaUrl'] ) . '"><span class="hero-slider__cta-label" data-hero-cta-label>' . esc_html( $first['ctaLabel'] ) . '</span><span class="hero-slider__cta-arrow icon-[mdi--arrow-right]" aria-hidden="true"></span></a>';
 	$markup    .= '<div class="hero-slider__support"><p class="hero-slider__copy" id="hero-slider-copy" data-hero-copy aria-live="polite" aria-atomic="true">' . esc_html( $first['copy'] ) . '</p><div class="hero-slider__selector" role="group" aria-label="' . esc_attr( $group_label ) . '">';
 
 	foreach ( $slides as $index => $slide ) {
 		$active = 0 === $index;
-		$markup .= '<button class="hero-slider__selector-button' . ( $active ? ' is-active' : '' ) . '" type="button" data-hero-slide="' . esc_attr( $slide['id'] ) . '" data-title="' . esc_attr( $slide['title'] ) . '" data-copy="' . esc_attr( $slide['copy'] ) . '" data-cta-label="' . esc_attr( $slide['ctaLabel'] ) . '" data-cta-url="' . esc_url( $slide['ctaUrl'] ) . '" data-background="' . esc_attr( $slide['background'] ) . '" data-title-color="' . esc_attr( $slide['titleColor'] ) . '" data-accent="' . esc_attr( $slide['accentColor'] ) . '" data-visual="' . esc_attr( $slide['visual'] ) . '" aria-label="' . esc_attr( $slide['selectorLabel'] ) . '" aria-pressed="' . ( $active ? 'true' : 'false' ) . '"><span class="' . esc_attr( $slide['icon'] ) . '" aria-hidden="true"></span></button>';
+		$markup .= '<button class="hero-slider__selector-button' . ( $active ? ' is-active' : '' ) . '" type="button" data-hero-slide="' . esc_attr( $slide['id'] ) . '" data-title="' . esc_attr( $slide['title'] ) . '" data-copy="' . esc_attr( $slide['copy'] ) . '" data-cta-label="' . esc_attr( $slide['ctaLabel'] ) . '" data-cta-url="' . esc_url( $slide['ctaUrl'] ) . '" data-background="' . esc_attr( $slide['background'] ) . '" data-title-color="' . esc_attr( $slide['titleColor'] ) . '" data-accent="' . esc_attr( $slide['accentColor'] ) . '" data-visual="' . esc_attr( $slide['visual'] ) . '" data-visual-avif-srcset="' . esc_attr( sarafatto_home_hero_responsive_srcset( $slide['visual'], 'avif' ) ) . '" data-visual-webp-srcset="' . esc_attr( sarafatto_home_hero_responsive_srcset( $slide['visual'], 'webp' ) ) . '" aria-label="' . esc_attr( $slide['selectorLabel'] ) . '" aria-pressed="' . ( $active ? 'true' : 'false' ) . '"><span class="' . esc_attr( $slide['icon'] ) . '" aria-hidden="true"></span></button>';
 	}
 
 	$markup .= '</div></div></div></section></div>';

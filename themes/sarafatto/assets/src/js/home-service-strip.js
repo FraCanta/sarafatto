@@ -1,7 +1,4 @@
-import { gsap } from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
-
-gsap.registerPlugin(ScrollTrigger);
+import { gsap } from './motion-runtime.js';
 
 /** Reveal the Home service links as they enter the viewport. */
 export function initHomeServiceStrip() {

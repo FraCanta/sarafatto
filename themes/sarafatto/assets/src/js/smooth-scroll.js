@@ -1,5 +1,6 @@
 import Lenis from 'lenis';
 import 'lenis/dist/lenis.css';
+import { setLenisInstance } from './scroll-bridge.js';
 
 let lenisInstance = null;
 
@@ -16,6 +17,7 @@ export function initSmoothScroll() {
     anchors: true,
     stopInertiaOnNavigate: true,
   });
+  setLenisInstance(lenisInstance);
 
   return lenisInstance;
 }

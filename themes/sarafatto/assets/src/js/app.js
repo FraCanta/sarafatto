@@ -1,29 +1,9 @@
-/** Front-end entry point. Add small, focused modules here as the project grows. */
+/** Global front-end entry point; page-specific behavior lives in its own entry. */
 import '../css/app.css';
-
-import { initSmoothScroll } from './smooth-scroll.js';
 import { initMobileMenu } from './mobile-menu.js';
 import { initPrimarySubmenus } from './primary-submenus.js';
-import { initFeaturedProducts } from './featured-products.js';
 import { initHeaderScroll } from './header-scroll.js';
-import { initProductGallery } from './product-gallery.js';
-import { initHomeHero } from './home-hero.js';
-import { initHomePersonalized } from './home-personalized.js';
-import { initHomeServiceStrip } from './home-service-strip.js';
-import { initHomeSectionReveals } from './home-section-reveals.js';
-import { initHomeScrollRibbon } from './home-scroll-ribbon.js';
-import { initProductArchiveHero } from './product-archive-hero.js';
-
-const lenis = initSmoothScroll();
 
 initPrimarySubmenus();
-initMobileMenu(lenis);
-initFeaturedProducts();
+initMobileMenu();
 initHeaderScroll();
-initProductGallery();
-initHomeHero(lenis);
-initHomePersonalized();
-initHomeServiceStrip();
-initHomeSectionReveals();
-initHomeScrollRibbon();
-initProductArchiveHero(lenis);
