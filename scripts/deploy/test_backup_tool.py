@@ -407,8 +407,10 @@ class BackupToolTests(unittest.TestCase):
     @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
     def test_20_baseline_assente_blocca_backup(self):
         self.baseline_path.unlink()
-        with self.assertRaises(backup_tool.BackupError):
+        with self.assertRaisesRegex(backup_tool.BackupError, "Baseline assente"):
             self.create()
+        self.assertEqual(list(self.backups.iterdir()), [])
+        self.assertFalse(any(path.name.startswith(".incomplete-") for path in self.backups.iterdir()))
 
     def test_21_cli_non_accetta_destinazioni_o_root_arbitrarie(self):
         with self.assertRaises(SystemExit):

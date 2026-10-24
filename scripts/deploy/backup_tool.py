@@ -107,7 +107,10 @@ def require_private_directories(private_root, expected_root):
 def open_directory_at(parent_fd, name, label):
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not os.open in os.supports_dir_fd:
         raise BackupError("Operazioni private sicure richiedono openat/O_NOFOLLOW su POSIX.")
-    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        raise BackupError(f"Directory assente o non sicura: {label}.") from exc
     info = os.fstat(descriptor)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o700):
@@ -183,7 +186,10 @@ def available_bytes_at(directory_fd):
 
 
 def open_at_regular_bytes(directory_fd, name, label, expected_mode=None, limit=None):
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError as exc:
+        raise BackupError(f"{label} assente o non apribile in sicurezza.") from exc
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
@@ -201,7 +207,10 @@ def open_at_regular_bytes(directory_fd, name, label, expected_mode=None, limit=N
 
 
 def stat_regular_at(directory_fd, name, label, expected_mode=None):
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError as exc:
+        raise BackupError(f"{label} assente o non apribile in sicurezza.") from exc
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
