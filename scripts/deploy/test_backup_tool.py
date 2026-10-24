@@ -4,13 +4,16 @@
 import hashlib
 import importlib.util
 import io
+import errno
 import json
 import os
 import pathlib
+import shutil
 import stat
 import sys
 import tempfile
 import tarfile
+import threading
 import unittest
 from unittest import mock
 
@@ -225,6 +228,187 @@ class BackupToolTests(unittest.TestCase):
         with self.assertRaises(backup_tool.BackupError):
             self.create()
         self.assertEqual(hash_bytes(archive.read_bytes()), before)
+
+    @unittest.skipUnless(fcntl is not None, "fixture POSIX di finalizzazione eseguita su runner GitHub")
+    def test_10a_renameat2_non_supportato_usa_fallback_no_clobber(self):
+        cleanup = backup_tool.remove_current_temporary_snapshot
+        observed_independent_files = []
+
+        def inspect_then_cleanup(source, source_fd, parent_fd):
+            final_fd = os.open(self.backup_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                               dir_fd=parent_fd)
+            try:
+                for name in (backup_tool.BACKUP_ARCHIVE, "manifest.json", "manifest.sha256"):
+                    source_info = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                    final_info = os.stat(name, dir_fd=final_fd, follow_symlinks=False)
+                    observed_independent_files.append((source_info.st_dev, source_info.st_ino)
+                                                      != (final_info.st_dev, final_info.st_ino))
+                source_archive = os.open(backup_tool.BACKUP_ARCHIVE, os.O_WRONLY | os.O_TRUNC,
+                                         dir_fd=source_fd)
+                with os.fdopen(source_archive, "wb") as stream:
+                    stream.write(b"changed only in temporary directory")
+                final_archive = os.open(backup_tool.BACKUP_ARCHIVE, os.O_RDONLY | os.O_NOFOLLOW,
+                                        dir_fd=final_fd)
+                with os.fdopen(final_archive, "rb") as stream:
+                    final_digest = hashlib.sha256(stream.read()).hexdigest()
+                final_manifest = json.loads((self.backups / self.backup_id / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(final_digest, final_manifest["archive"]["sha256"])
+            finally:
+                os.close(final_fd)
+            cleanup(source, source_fd, parent_fd)
+
+        with mock.patch.object(backup_tool, "renameat2_noreplace", return_value=False), \
+                mock.patch.object(backup_tool, "remove_current_temporary_snapshot", side_effect=inspect_then_cleanup):
+            result = self.create()
+        self.assertEqual(result["finalization"], "mkdirat+copyat")
+        self.assertTrue(observed_independent_files)
+        self.assertTrue(all(observed_independent_files))
+        verified = backup_tool.verify_backup(self.backup_id, self.baseline_sha, result["manifest_sha256"],
+                                             private_root=self.private, expected_private_root=self.private)
+        self.assertEqual(verified["status"], "verified")
+        self.assertFalse(any(path.name.startswith(".incomplete-" + self.backup_id) for path in self.backups.iterdir()))
+
+    @unittest.skipUnless(fcntl is not None, "fixture POSIX di finalizzazione eseguita su runner GitHub")
+    def test_10b_einval_renameat2_usa_fallback(self):
+        with mock.patch.object(backup_tool, "renameat2_noreplace",
+                               side_effect=OSError(errno.EINVAL, "flag non supportato")):
+            result = self.create()
+        self.assertEqual(result["finalization"], "mkdirat+copyat")
+        self.assertEqual(backup_tool.verify_backup(self.backup_id, self.baseline_sha, result["manifest_sha256"],
+                                                   private_root=self.private,
+                                                   expected_private_root=self.private)["status"], "verified")
+
+    @unittest.skipUnless(fcntl is not None, "fixture POSIX no-clobber eseguita su runner GitHub")
+    def test_10c_destinazione_esistente_non_viene_sovrascritta(self):
+        destination = self.backups / self.backup_id
+        destination.mkdir(mode=0o700)
+        sentinel = destination / "sentinel"
+        sentinel.write_text("keep", encoding="utf-8")
+        sentinel.chmod(0o600)
+        source_name = ".incomplete-" + self.backup_id + "-1234abcd"
+        source = self.backups / source_name
+        source.mkdir(mode=0o700)
+        parent_fd = os.open(self.backups, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        source_fd = os.open(source_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            with mock.patch.object(backup_tool, "renameat2_noreplace", return_value=False):
+                with self.assertRaisesRegex(backup_tool.BackupError, "già esistente"):
+                    backup_tool.rename_backup_noreplace(source_name, self.backup_id, parent_fd, source_fd,
+                                                        self.baseline_sha, "0" * 64)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+            self.assertTrue(source.exists())
+        finally:
+            os.close(source_fd)
+            os.close(parent_fd)
+
+    @unittest.skipUnless(fcntl is not None, "fixture POSIX concorrente eseguita su runner GitHub")
+    def test_10d_finalizzazione_concorrente_no_clobber(self):
+        seed = self.create()
+        seed_dir = self.backups / self.backup_id
+        final_id = "20261024T120010Z-abcdef123456"
+        source_names = [".incomplete-" + final_id + "-11111111",
+                        ".incomplete-" + final_id + "-22222222"]
+        manifest = json.loads((seed_dir / "manifest.json").read_text(encoding="utf-8"))
+        manifest["backup_id"] = final_id
+        raw = backup_tool.json_bytes(manifest)
+        digest = hash_bytes(raw)
+        for source_name in source_names:
+            source = self.backups / source_name
+            source.mkdir(mode=0o700)
+            for name in (backup_tool.BACKUP_ARCHIVE,):
+                shutil.copyfile(seed_dir / name, source / name)
+            (source / "manifest.json").write_bytes(raw)
+            (source / "manifest.sha256").write_text(f"{digest}  manifest.json\n", encoding="ascii")
+            (source / "COMPLETE").write_text(digest + "\n", encoding="ascii")
+            for item in source.iterdir():
+                item.chmod(0o600)
+            source.chmod(0o700)
+
+        parent_fd = os.open(self.backups, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        barrier = threading.Barrier(2)
+        results = []
+        result_lock = threading.Lock()
+
+        def finalize(source_name):
+            source_fd = os.open(source_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                barrier.wait(timeout=10)
+                backup_tool.rename_backup_noreplace(source_name, final_id, parent_fd, source_fd,
+                                                    self.baseline_sha, digest)
+                outcome = "ok"
+            except backup_tool.BackupError as exc:
+                outcome = str(exc)
+            finally:
+                os.close(source_fd)
+            with result_lock:
+                results.append(outcome)
+
+        try:
+            with mock.patch.object(backup_tool, "renameat2_noreplace", return_value=False):
+                threads = [threading.Thread(target=finalize, args=(name,)) for name in source_names]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=20)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(results.count("ok"), 1)
+            self.assertEqual(sum("già esistente" in result for result in results), 1)
+            checked = backup_tool.verify_backup_directory(self.backups / final_id, final_id,
+                                                          self.baseline_sha, digest)
+            self.assertEqual(checked["manifest_sha256"], digest)
+        finally:
+            os.close(parent_fd)
+
+    @unittest.skipUnless(fcntl is not None, "fixture POSIX di interruzione eseguita su runner GitHub")
+    def test_10e_interruzioni_fallback_non_pubblicano_backup_valido(self):
+        real_copy = backup_tool.copy_snapshot_file
+        real_write = backup_tool.write_at
+        scenarios = ["after-mkdir", "after-payload", "after-manifest", "after-checksum", "before-complete"]
+
+        for index, scenario in enumerate(scenarios, 20):
+            backup_id = f"20261024T1200{index:02d}Z-abcdef123456"
+            copy_count = 0
+            complete_count = 0
+
+            def interrupt_copy(source_fd, destination_fd, name):
+                nonlocal copy_count
+                copy_count += 1
+                if scenario == "after-mkdir":
+                    raise backup_tool.BackupError("interruzione fixture dopo mkdirat")
+                result = real_copy(source_fd, destination_fd, name)
+                target = {"payload.tar.gz": 1, "manifest.json": 2, "manifest.sha256": 3}.get(name)
+                if target == copy_count and scenario == ("after-payload" if target == 1 else
+                                                         "after-manifest" if target == 2 else "after-checksum"):
+                    raise backup_tool.BackupError("interruzione fixture dopo copia file")
+                return result
+
+            def interrupt_before_complete(directory_fd, name, payload, mode=0o600):
+                nonlocal complete_count
+                if name == "COMPLETE":
+                    complete_count += 1
+                    if complete_count == 2:
+                        raise backup_tool.BackupError("interruzione fixture prima di COMPLETE")
+                return real_write(directory_fd, name, payload, mode)
+
+            with mock.patch.object(backup_tool, "renameat2_noreplace", return_value=False), \
+                    mock.patch.object(backup_tool, "copy_snapshot_file", side_effect=interrupt_copy), \
+                    mock.patch.object(backup_tool, "write_at", side_effect=interrupt_before_complete):
+                with self.assertRaises(backup_tool.BackupError):
+                    self.create(backup_id=backup_id)
+
+            final_dir = self.backups / backup_id
+            rows = backup_tool.list_backups(private_root=self.private, expected_private_root=self.private)
+            row = next(item for item in rows if item.get("path") == final_dir.name)
+            self.assertEqual(row["status"], "incomplete-or-interrupted", scenario)
+            manifest_path = final_dir / "manifest.json"
+            manifest_digest = hash_bytes(manifest_path.read_bytes()) if manifest_path.exists() else "0" * 64
+            with self.assertRaises(backup_tool.BackupError):
+                backup_tool.verify_backup(backup_id, self.baseline_sha, manifest_digest,
+                                          private_root=self.private, expected_private_root=self.private)
+            with self.assertRaises(backup_tool.BackupError):
+                backup_tool.restore_test(backup_id, self.baseline_sha, manifest_digest, 10**9,
+                                         private_root=self.private, expected_private_root=self.private,
+                                         disk_free_bytes=10**9)
 
     @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
     def test_11_lock_occupato_blocca(self):

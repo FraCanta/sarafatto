@@ -656,13 +656,17 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
             raise BackupError("Filesystem pubblico cambiato durante la creazione del backup.")
         assert_private_root_still_named(private)
         assert_directory_still_named(private["root_fd"], "backups", private["backups_fd"], "backups")
-        rename_backup_noreplace(temporary_name, backup_id, directory_fd=private["backups_fd"])
+        finalization_method = rename_backup_noreplace(
+            temporary_name, backup_id, directory_fd=private["backups_fd"],
+            temporary_fd=temporary_fd, baseline_sha256=baseline_digest,
+            manifest_sha256=manifest_hash)
         os.fsync(private["backups_fd"])
         return {"backup_id": backup_id, "path": str(paths["backups"] / backup_id), "baseline_sha256": baseline_digest,
                 "baseline_commit": commit_sha, "files": summary["files"], "extras": summary["extras"],
                 "bytes": total_bytes, "required_free_bytes": required,
                 "account_quota_free_bytes_confirmed": quota_free_bytes,
-                "archive_bytes": manifest["archive"]["size"], "manifest_sha256": manifest_hash}
+                "archive_bytes": manifest["archive"]["size"], "manifest_sha256": manifest_hash,
+                "finalization": finalization_method}
     finally:
         if temporary_fd is not None:
             os.close(temporary_fd)
@@ -672,24 +676,159 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
         close_private_directories(private)
 
 
-def rename_backup_noreplace(source, destination, directory_fd=None):
-    if os.name != "posix" or directory_fd is None:
-        raise BackupError("Finalizzazione sicura richiede renameat2 e directory descriptor POSIX.")
+def renameat2_noreplace(source, destination, directory_fd):
     import ctypes
     import errno
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
-        raise BackupError("renameat2(RENAME_NOREPLACE) non disponibile: finalizzazione bloccata.")
+        return False
     renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
     renameat2.restype = ctypes.c_int
     result = renameat2(directory_fd, os.fsencode(source), directory_fd, os.fsencode(destination), 1)
     if result == 0:
-        return
+        return True
     error = ctypes.get_errno()
     if error == errno.EEXIST:
         raise BackupError("Backup ID già esistente: nessuna sovrascrittura consentita.")
+    unsupported = {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)}
+    if error in unsupported:
+        return False
     raise OSError(error, os.strerror(error), str(destination))
+
+
+def validate_finalization_names(source, destination):
+    validate_id(destination)
+    if (not isinstance(source, str) or "/" in source or "\\" in source
+            or not re.fullmatch(r"\.incomplete-" + re.escape(destination) + r"-[a-f0-9]{8}", source)):
+        raise BackupError("Nome directory temporanea non valido per la finalizzazione.")
+
+
+def remove_current_temporary_snapshot(source, source_fd, parent_fd):
+    """Rimuove solo i file della directory temporanea creata da questa invocazione."""
+    named = os.stat(source, dir_fd=parent_fd, follow_symlinks=False)
+    opened = os.fstat(source_fd)
+    if (not stat.S_ISDIR(named.st_mode) or stat.S_ISLNK(named.st_mode)
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)):
+        raise BackupError("Directory temporanea sostituita: cleanup bloccato.")
+    for name in (BACKUP_ARCHIVE, "manifest.json", "manifest.sha256", "COMPLETE"):
+        os.unlink(name, dir_fd=source_fd)
+    os.rmdir(source, dir_fd=parent_fd)
+
+
+def copy_snapshot_file(source_fd, destination_fd, name):
+    source_file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
+    destination_file_fd = None
+    try:
+        before = os.fstat(source_file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) != 0o600):
+            raise BackupError(f"File temporaneo non regolare o con permessi inattesi: {name}.")
+        try:
+            destination_file_fd = os.open(
+                name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600, dir_fd=destination_fd)
+        except FileExistsError as exc:
+            raise BackupError(f"File già presente nella directory finale: {name}.") from exc
+        digest = hashlib.sha256()
+        copied = 0
+        with os.fdopen(source_file_fd, "rb", closefd=False) as source_stream, \
+                os.fdopen(destination_file_fd, "wb", closefd=False) as destination_stream:
+            for block in iter(lambda: source_stream.read(1024 * 1024), b""):
+                destination_stream.write(block)
+                digest.update(block)
+                copied += len(block)
+            destination_stream.flush()
+            os.fchmod(destination_stream.fileno(), 0o600)
+            os.fsync(destination_stream.fileno())
+        after = os.fstat(source_file_fd)
+        if (copied != before.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise BackupError(f"File temporaneo cambiato durante la copia: {name}.")
+        return digest.hexdigest()
+    finally:
+        os.close(source_file_fd)
+        if destination_file_fd is not None:
+            os.close(destination_file_fd)
+
+
+def finalize_by_reserved_copy(source, destination, parent_fd, source_fd,
+                              baseline_sha256, manifest_sha256):
+    """Fallback no-clobber: mkdirat riserva il nome e copie O_EXCL pubblicano i file."""
+    try:
+        os.mkdir(destination, 0o700, dir_fd=parent_fd)
+    except FileExistsError as exc:
+        raise BackupError("Backup ID già esistente: nessuna sovrascrittura consentita.") from exc
+    except OSError as exc:
+        raise BackupError(f"Impossibile riservare atomicamente il nome backup: {exc}.") from exc
+
+    destination_fd = None
+    try:
+        os.fsync(parent_fd)
+        destination_fd = open_directory_at(parent_fd, destination, "backup finale riservato")
+        for name in (BACKUP_ARCHIVE, "manifest.json", "manifest.sha256"):
+            copy_snapshot_file(source_fd, destination_fd, name)
+
+        # Rende durevoli i dati e i tre nomi prima che COMPLETE possa essere visibile.
+        os.fsync(destination_fd)
+        verify_backup_directory(None, destination, baseline_sha256, manifest_sha256,
+                                require_complete=False, directory_fd=destination_fd)
+        complete = open_at_regular_bytes(source_fd, "COMPLETE", "Marker COMPLETE", 0o600, 128)
+        if complete != (manifest_sha256 + "\n").encode("ascii"):
+            raise BackupError("Marker COMPLETE temporaneo non corrispondente al manifest.")
+        write_at(destination_fd, "COMPLETE", complete)
+        # write_at fsynca il marker; il fsync directory rende durevole la sua pubblicazione.
+        os.fsync(destination_fd)
+        verify_backup_directory(None, destination, baseline_sha256, manifest_sha256,
+                                require_complete=True, directory_fd=destination_fd)
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+
+    # Solo dopo verifica finale viene rimossa la directory temporanea di questa invocazione.
+    remove_current_temporary_snapshot(source, source_fd, parent_fd)
+    os.fsync(parent_fd)
+    return "mkdirat+copyat"
+
+
+def rename_backup_noreplace(source, destination, directory_fd=None, temporary_fd=None,
+                            baseline_sha256=None, manifest_sha256=None):
+    if (os.name != "posix" or directory_fd is None or temporary_fd is None
+            or not os.open in os.supports_dir_fd):
+        raise BackupError("Finalizzazione sicura richiede primitive POSIX ancorate a directory descriptor.")
+    validate_finalization_names(source, destination)
+    temp_info = os.fstat(temporary_fd)
+    named_source = os.stat(source, dir_fd=directory_fd, follow_symlinks=False)
+    if (not stat.S_ISDIR(temp_info.st_mode) or stat.S_ISLNK(named_source.st_mode)
+            or not stat.S_ISDIR(named_source.st_mode)
+            or (temp_info.st_dev, temp_info.st_ino) != (named_source.st_dev, named_source.st_ino)):
+        raise BackupError("Directory temporanea cambiata o non regolare prima della finalizzazione.")
+    try:
+        exists = os.stat(destination, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise BackupError("Backup ID già esistente: nessuna sovrascrittura consentita.")
+
+    try:
+        renamed = renameat2_noreplace(source, destination, directory_fd)
+    except OSError as exc:
+        import errno
+        unsupported = {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP,
+                      getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)}
+        if exc.errno not in unsupported:
+            raise
+        renamed = False
+    if renamed:
+        return "renameat2(RENAME_NOREPLACE)"
+    if not re.fullmatch(r"[a-f0-9]{64}", baseline_sha256 or "") or not re.fullmatch(r"[a-f0-9]{64}", manifest_sha256 or ""):
+        raise BackupError("Digest richiesti per la finalizzazione alternativa non validi.")
+    # Verifica nuovamente lo snapshot ancorato prima del fallback.
+    verify_backup_directory(None, destination, baseline_sha256, manifest_sha256,
+                            directory_fd=temporary_fd)
+    return finalize_by_reserved_copy(source, destination, directory_fd, temporary_fd,
+                                     baseline_sha256, manifest_sha256)
 
 
 def verify_backup(backup_id, baseline_sha256, manifest_sha256, *, private_root=PRIVATE_ROOT,
@@ -939,6 +1078,9 @@ def list_backups(*, private_root=PRIVATE_ROOT, expected_private_root=PRIVATE_ROO
             try:
                 entry_fd = open_directory_at(private["backups_fd"], name, "backup")
                 try:
+                    if "COMPLETE" not in os.listdir(entry_fd):
+                        results.append({"path": name, "status": "incomplete-or-interrupted"})
+                        continue
                     raw = open_at_regular_bytes(entry_fd, "manifest.json", "Manifest", 0o600, MAX_MANIFEST_BYTES)
                     manifest = read_json_no_duplicates(raw, "manifest")
                     backup_id = manifest.get("backup_id")
