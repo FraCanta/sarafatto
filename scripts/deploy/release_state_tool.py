@@ -257,7 +257,7 @@ def validate_state_document(document, expected_baseline_sha=None):
     return document
 
 
-def read_journal_at(state_fd):
+def read_journal_at(state_fd, *, allow_fixture_committed=False):
     try:
         fd = os.open(JOURNAL_NAME, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=state_fd)
     except FileNotFoundError:
@@ -295,8 +295,9 @@ def read_journal_at(state_fd):
         "files_verified": {"health_verified", "recovery_required"},
         # Nessuna transizione a committed è ammessa finché manca il verificatore
         # della transazione di pubblicazione previsto per una fase successiva.
-        "health_verified": {"recovery_required"},
-        "recovery_required": set(),
+        "health_verified": ({"committed", "recovery_required"} if allow_fixture_committed
+                             else {"recovery_required"}),
+        "committed": set(), "recovery_required": set(),
     }
     for number, line in enumerate(raw.splitlines(), 1):
         event = _read_json(line, f"journal riga {number}")
@@ -317,11 +318,23 @@ def read_journal_at(state_fd):
         if not OPERATION_ID_RE.fullmatch(str(operation_id or "")) or status not in OPERATION_STATES:
             raise ReleaseStateError("Evento journal con ID o stato non valido.")
         if status == "committed":
-            raise ReleaseStateError("Evento committed rifiutato: nessun verificatore di deploy è abilitato in Fase 3D.1.")
+            details = event["details"]
+            if (not allow_fixture_committed or details.get("fixture_only") is not True
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("plan_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("final_inventory_sha256", "")))):
+                raise ReleaseStateError("Evento committed rifiutato: solo il verificatore fixture può registrarlo.")
         if journal_operation_id is None:
             journal_operation_id = operation_id
         elif operation_id != journal_operation_id:
-            raise ReleaseStateError("Journal con operazioni intercalate o ID duplicati non consentiti.")
+            previous_status = operation_status.get(journal_operation_id)
+            completed_by_rollback = (
+                allow_fixture_committed and previous_status == "recovery_required"
+                and status == "prepared"
+                and event["details"].get("rollback_of") == journal_operation_id
+            )
+            if not allow_fixture_committed or (previous_status != "committed" and not completed_by_rollback):
+                raise ReleaseStateError("Journal con operazioni intercalate o ID duplicati non consentiti.")
+            journal_operation_id = operation_id
         prior_status = operation_status.get(operation_id)
         if status not in allowed_next.get(prior_status, set()):
             raise ReleaseStateError(f"Sequenza journal non valida: {prior_status} -> {status}.")
@@ -331,13 +344,19 @@ def read_journal_at(state_fd):
     return events
 
 
-def unresolved_operation(events):
+def unresolved_operation(events, *, allow_fixture_committed=False):
     active = {}
     for event in events:
         operation_id = event["operation_id"]
         if event["status"] == "committed":
-            raise ReleaseStateError("Evento committed rifiutato: nessun verificatore di deploy è abilitato in Fase 3D.1.")
-        active[operation_id] = event
+            if (not allow_fixture_committed or event.get("details", {}).get("fixture_only") is not True):
+                raise ReleaseStateError("Evento committed rifiutato: nessun verificatore fixture autorizzato.")
+            active.pop(operation_id, None)
+            rollback_of = event.get("details", {}).get("rollback_of")
+            if rollback_of is not None:
+                active.pop(rollback_of, None)
+        else:
+            active[operation_id] = event
     unresolved = list(active.values())
     if unresolved:
         latest = unresolved[-1]
