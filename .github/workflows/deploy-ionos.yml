@@ -51,12 +51,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py", "scripts/deploy/production_adapter.py", "scripts/deploy/test_production_adapter.py")]'
+          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py", "scripts/deploy/production_adapter.py", "scripts/deploy/test_production_adapter.py", "scripts/deploy/ionos_release_barrier_probe.py", "scripts/deploy/test_ionos_release_barrier_probe.py")]'
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_backup_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_release_state_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_transaction_fixture_tool.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
+          SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_ionos_release_barrier_probe.py
           bash scripts/deploy/test-preview-fixtures.sh
           bash scripts/deploy/test-baseline-inventory-fixture.sh
 

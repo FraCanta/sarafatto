@@ -211,7 +211,7 @@ Queste fasi non abilitano deploy o rollback reali, non modificano i file applica
 
 ## Fase 3D.4 — ispezione remota protetta e blocco delle scritture pubbliche
 
-`scripts/deploy/production_adapter.py` è un adattatore **solo read-only**. La CLI espone esclusivamente `inspect --authorized-sha <40 caratteri>`; non esistono sottocomandi bootstrap, publish, deploy o rollback. L'adattatore usa percorsi IONOS fissi, rifiuta componenti symlink, verifica che il repository remoto sia esattamente allo SHA autorizzato e che i sorgenti di controllo corrispondano ai blob Git. Verifica la baseline con lo SHA ufficiale, legge `current-release.json` e il journal senza seguire symlink, acquisisce un lock condiviso non bloccante e confronta due inventari pubblici freschi. Se lo stato corrente manca, restituisce `bootstrap-required` e termina con codice 3. In ogni caso `publish_allowed` resta `false`.
+`scripts/deploy/production_adapter.py` è un adattatore **solo read-only**. La CLI espone esclusivamente `inspect --authorized-sha <40 caratteri>`; non esistono sottocomandi bootstrap, publish, deploy o rollback. L'adattatore usa percorsi IONOS fissi, rifiuta componenti symlink, verifica che il repository remoto sia esattamente allo SHA autorizzato e che i sorgenti di controllo corrispondano ai blob Git. Verifica la baseline con lo SHA ufficiale, legge `current-release.json` e il journal senza seguire symlink, acquisisce un lock condiviso non bloccante e confronta due inventari pubblici freschi. Se lo stato corrente manca, restituisce `bootstrap-required` e termina con codice 3. Il report distingue la verifica dello stato corrente dalla readiness di pubblicazione: quest'ultima elenca esplicitamente barriera anti-versioni-miste, verificatore transazionale, backup fresco, health check e approvazione mancanti. Anche fornendo valori di prova a livello di test, il gate resta bloccato finché non esiste un publisher verificato. `publish_allowed` resta sempre `false`.
 
 ### Workflow manuale
 
@@ -251,4 +251,46 @@ Non è ancora dimostrabile che le richieste WordPress non possano osservare file
 
 La compatibilità del filesystem IONOS non è confermata da test sul runner GitHub. I test esistenti coprono fallback e collisioni su filesystem di test, ma non dimostrano il comportamento del Ceph dell'hosting, le semantiche di rename/fsync, OPcache o la risoluzione dei symlink in PHP. Prima di autorizzare scritture servono prove circoscritte in area privata IONOS, senza percorsi pubblici, per le primitive usate; i risultati devono essere registrati e revisionati. Anche questo non autorizza da solo il deploy.
 
-Fino alla soluzione della barriera contro le versioni miste, alla verifica controllata delle primitive IONOS e all'implementazione dei gate sopra, il deploy e il rollback reali restano bloccati. La Fase 4A e i relativi asset non fanno parte di questa pipeline.
+Fino alla soluzione della barriera contro le versioni miste, alla verifica controllata delle primitive IONOS e all'implementazione dei gate sopra, il deploy e il rollback reali restano bloccati. L'esito `verified-current` dell'ispezione registrato sul server è prova soltanto che inventario e stato corrente concordano in quel momento; non è un'autorizzazione né prova della sicurezza di una transazione. La Fase 4A e i relativi asset non fanno parte di questa pipeline.
+
+## Banco privato per compatibilità filesystem e barriera release
+
+`scripts/deploy/ionos_release_barrier_probe.py diagnose` crea un run univoco esclusivamente sotto `/home/www/sarafatto-deploy/staging/ionos-release-probe-<UTC>-<id>/`. Rifiuta path non canonici/symlink, richiede la directory staging posseduta dall'utente con permessi `0700`, usa descriptor e `O_NOFOLLOW` per aprire i componenti e non accetta path, destinazioni, `--force` o opzioni di cleanup. Non apre la webroot pubblica. Non cancella run precedenti; anche un run interrotto va ispezionato e classificato manualmente.
+
+### Procedura IONOS
+
+Prerequisiti: il commit contenente lo script deve essere stato installato nel repository IONOS con il normale processo di aggiornamento degli strumenti; questa procedura non lo fa. Prima, verificare separatamente che `/home/www/sarafatto-deploy/staging` esista già e abbia owner e modalità attesi. Eseguire manualmente:
+
+~~~bash
+cd /home/www/sarafatto-repo
+GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/ionos_release_barrier_probe.py diagnose
+~~~
+
+Questo comando effettua scritture **solo nell'area privata staging**: crea directory e file fixture, prova symlink/`realpath`, rename di file e directory, modalità `0600`, `flock` esclusivo e `fsync` di file/directory. Se `php` CLI è disponibile raccoglie versione, SAPI, `open_basedir`, impostazioni OPcache/realpath e prova `include` di un file fixture privato. Produce `report.json` nella directory del run e stampa lo stesso report. Un errore può lasciare una directory di prova parziale, che non viene rimossa automaticamente.
+
+La prova confronta quattro modelli artificiali: aggiornamento in-place, alias symlink separati per componente, singolo puntatore a una directory release e pagina di manutenzione durante una richiesta già attiva. Il singolo puntatore viene testato con thread Python che fissano il descriptor della directory release all'inizio della richiesta simulata; il modello **non** dimostra che PHP/WordPress fissino allo stesso modo i path, né che il cambio di symlink sia atomico per worker PHP-FPM o OPcache.
+
+### Interpretazione e decisione
+
+| Strategia | Esito richiesto nel probe/modello | Limite prima di adottarla |
+| --- | --- | --- |
+| In-place | Il modello deve rilevare uno stato misto | Conferma che il lock deploy non rende atomiche le richieste web. Non usarla senza barriera che dreni davvero i worker. |
+| Quattro symlink, uno per componente | Il modello deve rilevare uno stato misto durante lo switch sequenziale | Rename atomico del singolo link non equivale ad attivazione atomica tema+plugin+MU-plugin+asset. |
+| Un solo puntatore a release completa | Switch filesystem riuscito e zero richieste miste nella simulazione con directory descriptor fissato | È solo una candidata. Va provato che il bootstrap PHP risolva una release una volta per richiesta e che tutte le costanti/percorse WordPress usino quella radice, separando uploads e plugin terzi. Va verificata compatibilità IONOS dei symlink, rename e OPcache. |
+| Manutenzione | Il modello deve mostrare che una richiesta già avviata può attraversare l'aggiornamento | Una pagina `.maintenance` non dimostra il drain delle richieste esistenti o l'invalidazione di tutti gli opcode. |
+
+Un esito `false` per symlink, rename, `flock` o `fsync` blocca ogni strategia che dipenda da quella primitiva. `fsync` riuscito prova soltanto che la chiamata non ha restituito errore nell'area privata; non prova la durabilità dichiarata dal filesystem remoto. Il probe non altera baseline, stato, journal o backup.
+
+### Verifiche ancora necessarie in ambiente isolato
+
+I valori `open_basedir`, OPcache, `realpath_cache_*`, SAPI e `include` raccolti dal probe sono quelli di **PHP CLI**, non della configurazione web. Per dimostrare il comportamento reale serve un vhost/docroot PHP isolato, autorizzato e separato dalla webroot attiva, con due release artificiali e richieste HTTP concorrenti che restituiscano la quadrupla di versioni. Non pubblicare script di test sotto `/home/www/public`, non usare il database WordPress e non usare il sito live come banco prova. Se IONOS non offre un ambiente HTTP/PHP-FPM isolato equivalente o non consente di verificare OPcache e il pin della release per richiesta, la compatibilità delle richieste reali resta **non dimostrata** e il deploy deve rimanere bloccato.
+
+Il workflow conserva `workflow_dispatch` come unico trigger e aggiunge soltanto sintassi e test offline del probe al job `validate`; non aggiunge job SSH, backup remoto, deploy o rollback. Le fixture CI sono riproducibili su Ubuntu con:
+
+~~~bash
+SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/test_ionos_release_barrier_probe.py
+~~~
+
+Questa CI verifica il modello e le primitive POSIX del runner GitHub, non l'hosting IONOS. La prima pubblicazione potrà essere valutata solo dopo revisione dei report privati IONOS, collaudo HTTP/PHP-FPM isolato, prova documentata del pinning dei componenti per richiesta, gestione di OPcache, fault/recovery e rollback in un ambiente equivalente. Nessuno di questi risultati è presunto dal probe.

@@ -63,6 +63,38 @@ def current_state_readiness(current_state):
     return "verified-current", []
 
 
+def publication_readiness(*, current_state, traffic_barrier_verified=False,
+                          transaction_verifier_available=False,
+                          health_check_verified=False, fresh_backup_verified=False,
+                          explicit_environment_approval=False):
+    """Gate esplicito: inspect non equivale mai ad autorizzazione di pubblicazione.
+
+    Le prove devono arrivare da verificatori implementati e indipendenti; valori
+    booleani da soli non vengono esposti nella CLI e questa funzione non effettua
+    né abilita scritture.
+    """
+    blockers = []
+    try:
+        current_state_readiness(current_state)
+    except ProductionAdapterError as exc:
+        blockers.append(str(exc))
+    if not traffic_barrier_verified:
+        blockers.append("Barriera verificata contro versioni miste non disponibile.")
+    if not transaction_verifier_available:
+        blockers.append("Verificatore di transazione di produzione non implementato.")
+    if not fresh_backup_verified:
+        blockers.append("Backup fresco verificato per questa operazione non disponibile.")
+    if not health_check_verified:
+        blockers.append("Health check post-operazione non verificato.")
+    if not explicit_environment_approval:
+        blockers.append("Approvazione esplicita dell'ambiente di produzione assente.")
+    # Non esiste ancora un publisher di produzione. Anche prove future non
+    # devono rendere questa ispezione una via indiretta per abilitare scritture.
+    blockers.append("Publisher di produzione non implementato: le scritture restano disabilitate.")
+    return {"status": "blocked",
+            "publish_allowed": False, "blockers": blockers}
+
+
 def _require_fixed_directory(path):
     path = pathlib.Path(path)
     if not path.is_absolute():
@@ -243,6 +275,7 @@ def inspect_production_state(authorized_sha):
                 raise ProductionAdapterError("Inventario pubblico fresco diverso da current-release.json.")
 
         status, blockers = current_state_readiness(current_state)
+        publication = publication_readiness(current_state=current_state)
         return {
             "status": status,
             "authorized_repository_sha": authorized_sha,
@@ -260,8 +293,9 @@ def inspect_production_state(authorized_sha):
             "node_modules_excluded_symlinks": second_exclusion["symlinks"],
             "journal_events": len(journal),
             "public_writes_performed": False,
-            "publish_allowed": False,
-            "blockers": blockers,
+            "publish_allowed": publication["publish_allowed"],
+            "publication_readiness": publication,
+            "blockers": publication["blockers"],
         }
     finally:
         if lock_fd is not None:

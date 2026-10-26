@@ -44,6 +44,28 @@ class ProductionAdapterTests(unittest.TestCase):
         with self.assertRaises(adapter.ProductionAdapterError):
             adapter.current_state_readiness({"state_sha256": "a" * 64})
 
+    def test_gate_pubblicazione_rimane_chiuso_anche_con_prove_simulate(self):
+        current = {"state_sha256": "a" * 64,
+                   "verification": {"status": "verified-current"}}
+        gate = adapter.publication_readiness(
+            current_state=current,
+            traffic_barrier_verified=True,
+            transaction_verifier_available=True,
+            health_check_verified=True,
+            fresh_backup_verified=True,
+            explicit_environment_approval=True,
+        )
+        self.assertEqual(gate["status"], "blocked")
+        self.assertFalse(gate["publish_allowed"])
+        self.assertTrue(any("Publisher di produzione non implementato" in item
+                            for item in gate["blockers"]))
+
+    def test_gate_elenca_prerequisiti_reali_mancanti(self):
+        gate = adapter.publication_readiness(current_state=None)
+        self.assertEqual(gate["status"], "blocked")
+        self.assertFalse(gate["publish_allowed"])
+        self.assertGreaterEqual(len(gate["blockers"]), 6)
+
     def test_sha_autorizzato_completo_obbligatorio(self):
         self.assertEqual(adapter.validate_authorized_sha("a" * 40), "a" * 40)
         for value in ("a" * 39, "A" * 40, "a" * 41, "../main"):
