@@ -294,3 +294,95 @@ SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 \
 ~~~
 
 Questa CI verifica il modello e le primitive POSIX del runner GitHub, non l'hosting IONOS. La prima pubblicazione potrà essere valutata solo dopo revisione dei report privati IONOS, collaudo HTTP/PHP-FPM isolato, prova documentata del pinning dei componenti per richiesta, gestione di OPcache, fault/recovery e rollback in un ambiente equivalente. Nessuno di questi risultati è presunto dal probe.
+
+## Prova HTTP/PHP isolata A/B (senza WordPress)
+
+IONOS documenta la creazione di sottodomini e il collegamento di un dominio a una directory del webspace, ma la possibilità di usare proprio il percorso privato `staging/` come document root e la sua accessibilità da Apache/PHP devono essere confermate nel contratto/account. La documentazione del pannello permette di identificare la document root; non dimostra che un percorso arbitrario fuori dall'albero web pubblico venga accettato. Verificare il target nel Domain Center prima di associare il sottodominio. Non selezionare `/home/www/public`, `wp-content`, la root WordPress o una directory che li contenga.
+
+### Preparazione locale già inclusa nel repository
+
+I file `scripts/deploy/http_php_release_probe.py` e `scripts/deploy/http-release-probe/{index.php,asset.php}` preparano un banco senza WordPress o database. Il comando `prepare` crea solo un run univoco sotto `staging/`, con `docroot`, due directory immutabili `release-A`/`release-B`, marker PHP per tema/plugin/MU-plugin, un asset per release e un puntatore iniziale `current -> release-A`. Il `.htpasswd` viene creato vuoto e `.htaccess` richiede Basic Auth: non associare il sottodominio finché l'autenticazione non è stata configurata e testata. I run precedenti non vengono cancellati.
+
+Il front controller PHP chiama `realpath()` sul puntatore una volta all'inizio della richiesta, accetta soltanto la canonical path di A o B e usa poi quella radice immutabile per tutti e quattro i componenti. Il parametro di attesa è limitato a 0–2000 ms e viene applicato dopo la lettura del tema per mantenere richieste attive durante lo switch. L'endpoint asset accetta solo gli ID A/B. Entrambi restituiscono solo dati artificiali; nessun bootstrap WordPress, query o accesso al database.
+
+### Prerequisiti manuali su IONOS
+
+1. Eseguire i test filesystem privati della sezione precedente. Aggiornare manualmente il repository strumenti al commit che contiene il probe; non sovrascrivere o ripulire staging esistente.
+2. Via SSH manuale autorizzata, eseguire `python3 scripts/deploy/http_php_release_probe.py prepare` e conservare l'ID e il percorso restituiti. Questo scrive solo in staging. Il comando non crea il sottodominio.
+3. Verificare quale versione PHP il pannello assegna al sottodominio temporaneo e individuare il percorso CLI corrispondente al contratto. IONOS documenta percorsi CLI diversi secondo la data del contratto; non usare l'alias generico `php`. Eseguire `-l` sui due endpoint e su tutti i marker `release.php` dentro il run privato. Il PHP CLI può avere configurazione diversa dalla SAPI HTTP.
+4. Configurare un utente Basic Auth nel `.htpasswd` privato usando `htpasswd` senza `-c` (il file è stato creato) se disponibile; non mettere la password nella command line o nel repository. Se l'utility manca, fermarsi e predisporre una generazione sicura del formato supportato. Verificare che `.htaccess` venga applicato: una richiesta anonima deve ricevere HTTP 401.
+5. Solo dopo la protezione, creare manualmente un sottodominio temporaneo del tipo `release-probe-<id>.sara-fatto.it`, assegnargli la versione PHP scelta e tentare di collegarlo **esattamente** al `docroot` del run. Attivare HTTPS. Non installare WordPress, non associare il database e non aggiungere upload. Se IONOS rifiuta il percorso privato, richiede di spostarlo sotto la webroot pubblica, o impone di allargare i permessi di `/home/www/sarafatto-deploy` o `staging/`, fermarsi: questo banco non è isolato secondo i vincoli. Non allargare automaticamente i permessi.
+6. Prima del carico, provare da una sessione anonima che HTTPS risponda 401. Verificare inoltre che path non valido non mostri file o listing e che PHP esegua il codice invece di scaricarlo come sorgente. Un esito diverso blocca la prova.
+7. Dal server, avviare il test concorrente con l'host esatto del sottodominio:
+
+~~~bash
+cd /home/www/sarafatto-repo
+GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/http_php_release_probe.py stress \
+  --run-id 'ID_RESTITUITO_DA_PREPARE' \
+  --host 'release-probe-ID.sara-fatto.it' \
+  --requests 320 --workers 16 --hold-ms 500
+~~~
+
+Il tool accetta solo host `release-probe-*.sara-fatto.it`, TLS verificato, nessun redirect, controlla prima il 401 anonimo, chiede credenziali senza mostrarle e non le scrive nel report. Durante il carico cambia ripetutamente soltanto il symlink `releases/current` nel run privato, verifica JSON di ogni richiesta e recupera l'asset versione-specifico. L'ID run viene controllato con regex, marker, `.htaccess`, endpoint e hash/contenuto di tutte le fixture; symlink o file alterati bloccano il test. Il puntatore viene ripristinato al target iniziale in un `finally`; un kill non gestibile può lasciarlo su A o B, entrambi validi e privati. Report JSON salvato nel run privato. Non viene toccata alcuna directory del sito pubblico.
+
+### Criteri di esito
+
+Il report deve avere `status: passed`, tutte le richieste attese riuscite, zero combinazioni miste, zero errori HTTP/applicativi, almeno uno switch, risposte osservate sia da A sia da B e un solo profilo runtime coerente. Ogni risposta deve dichiarare versioni uguali per tema, plugin, MU-plugin e asset. Verificare manualmente che SAPI sia quella web (non CLI), PHP sia la versione assegnata al sottodominio, le impostazioni OPcache/realpath siano quelle attese e che non vi siano risposte cacheate. Confrontare almeno due run con valori diversi di `hold-ms` e concorrenza ridotta, oltre a un run ripetuto.
+
+Una sola versione osservata, 401 assente, redirect, TLS/configurazione runtime variabile, 4xx/5xx, risposta non JSON, endpoint PHP scaricato, permessi insufficienti, symlink non supportati, `open_basedir` che blocca il run o qualsiasi mix implica `status: blocked`/arresto e nessuna conclusione di compatibilità. Non abbassare la protezione né esporre la webroot per far passare il test.
+
+### Cosa prova e cosa non prova
+
+Il test HTTP verifica l'esecuzione PHP sul sottodominio e che **questo front controller di prova** pinni la canonical path della release prima di caricare componenti artificiali. La directory release non viene modificata durante il test: cambiano solo il puntatore privato e le richieste leggono file immutabili. OPcache e realpath sono riportati per richiesta; percorsi A/B distinti evitano di mutare file già cacheati, ma non dimostrano il comportamento di WordPress né tutti i worker se il sottodominio usa pool diversi dal dominio principale. Non dimostra che WordPress possa caricare tema, plugin, MU-plugin e asset da una root comune senza modifiche/configurazione dedicate, né che `WP_CONTENT_DIR`, URL, uploads, plugin terzi o gli altri path siano preservati. Non prova un deploy o rollback reale.
+
+Se il piano IONOS non consente document root privato, auth server-side, stessa versione/SAPI PHP, `open_basedir` adatto o un run HTTP isolato, il test va spostato su un webspace/contratto di test dedicato. Un account SFTP confinato alla directory non equivale a isolamento per gli script PHP; IONOS raccomanda un webspace/contratto distinto per la separazione effettiva. Anche con esito HTTP positivo, il deploy resta bloccato finché non si dimostra il bootstrap WordPress con root di release fissata per richiesta e non si collaudano fault, journal, backup, promozione stato e rollback in un ambiente equivalente.
+
+## Barriera di coordinamento richieste PHP (opt-in, non è un publisher)
+
+Il MU-plugin conserva il filtro Polylang esistente. La barriera è disattivata in assenza di una configurazione privata valida e `enabled: false`; inoltre il bootstrap opera solo con `WP_ENVIRONMENT_TYPE=production` e fuori dalla SAPI CLI. In questo stato un lock non accessibile non causa 503. La configurazione e il marker hanno percorsi fissi e non sono configurabili via richiesta. Il protocollo usa `locks/web-request.lock`: ogni richiesta web attiva acquisisce `flock(LOCK_SH|LOCK_NB)` e mantiene il descriptor fino allo shutdown PHP; una futura operazione dovrà armare prima il marker privato `state/request-deploy-window.json`, acquisire `LOCK_EX` sullo stesso inode con timeout finito e verificare il blocco HTTP prima di qualsiasi scrittura pubblica. Con marker presente, errori di configurazione o lock fanno rispondere 503 con `X-Sarafatto-Deploy-Barrier: active`; il marker non va rimosso automaticamente dopo un errore.
+
+Il lock PHP è distinto da `site-operation.lock`: quest'ultimo coordina strumenti CLI, mentre `web-request.lock` coordina le richieste web. La disponibilità e i permessi del file per l'utente PHP sono prerequisiti da provare dalla SAPI web. Non allargare permessi automaticamente. La configurazione prevista è `0600`, così come il lock; se l'utente PHP non può accedervi, non attivare la barriera. Un errore senza marker lascia il sito nel comportamento preesistente e la verifica deve fallire; ciò non autorizza il publisher.
+
+### Preparazione e verifica manuale
+
+I comandi seguenti sono **solo istruzioni**, non sono stati eseguiti. Richiedono che gli strumenti siano già presenti nel checkout privato IONOS e che le directory private `state/` e `locks/` esistano con owner/modalità attesi.
+
+1. **Scrittura solo nell'area privata:** `prepare-private` crea il lock se assente e una configurazione disabilitata, senza sovrascrivere file esistenti. Mostra una sola volta un token casuale: conservarlo in modo sicuro come Secret `SARAFATTO_BARRIER_STATUS_TOKEN`, senza inserirlo nel repository, nella command history o nei log.
+
+~~~bash
+cd /home/www/sarafatto-repo
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/request_barrier_tool.py prepare-private
+~~~
+
+2. Configurare il Secret nel sistema approvato. Quindi verificare **via HTTPS e PHP web**, con configurazione ancora disabilitata. Questo effettua una GET autenticata all'endpoint read-only e salva una prova fresca solo nell'area privata.
+
+~~~bash
+SARAFATTO_BARRIER_STATUS_TOKEN='TOKEN_FORNITO_IN_MODO_SICURO' \
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/request_barrier_tool.py verify-http --phase accessibility
+~~~
+
+3. Solo dopo esito positivo della prova di accessibilità, `activate-private` cambia atomicamente `request-barrier.json` da disabilitato ad abilitato, esclusivamente nell'area privata. Non arma il marker e non scrive file WordPress pubblici.
+
+~~~bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/request_barrier_tool.py activate-private
+~~~
+
+4. Verificare che richieste HTTP reali acquisiscano il lock condiviso e che lo stato attivo sia coerente. `assert-ready` ripete la verifica HTTP; **non** acquisisce lock esclusivo, non drena worker e non effettua pubblicazioni.
+
+~~~bash
+SARAFATTO_BARRIER_STATUS_TOKEN='TOKEN_FORNITO_IN_MODO_SICURO' \
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/request_barrier_tool.py verify-http --phase active
+SARAFATTO_BARRIER_STATUS_TOKEN='TOKEN_FORNITO_IN_MODO_SICURO' \
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/request_barrier_tool.py assert-ready
+~~~
+
+Questi comandi non vanno copiati con il token in una shell che registra la history. Usare il secret store/runner autorizzato e un input mascherato; non stampare mai il token. `prepare-private`, `activate-private` e la scrittura delle prove toccano solo `state/` e `locks/` private. Le chiamate HTTP sono GET verso l'endpoint autenticato; non modificano contenuti WordPress.
+
+### Prova del blocco e limiti
+
+L'endpoint autenticato riporta SAPI/versione PHP, accessibilità/acquisizione del lock, hash sorgente/configurazione e impostazioni OPcache/realpath osservabili. Un test HTTP della richiesta attiva può usare `hold_ms` limitato (massimo 2 secondi) per mantenere `LOCK_SH`; il test dell'interlock esclusivo richiede invece un marker operativo armato e un processo che detenga `LOCK_EX`, dopodiché l'endpoint pubblico deve restituire 503 con l'header dedicato. Tale prova provoca indisponibilità intenzionale durante la finestra: eseguirla solo su un ambiente HTTP isolato o in una finestra esplicitamente autorizzata. Nessuna prova CLI dimostra che PHP-FPM condivida il medesimo inode/lock o che tutte le richieste siano terminate.
+
+Un marker presente, anche invalido o non leggibile, è trattato conservativamente come finestra armata. In caso di interruzione il sito può continuare a rispondere 503 finché un operatore non verifica lo stato e rimuove il marker tramite una procedura di recovery autorizzata; non cancellarlo alla cieca. Se manca il Secret, l'endpoint non è raggiungibile, PHP non può leggere il lock o la prova è stantia, `assert-ready` fallisce e il publisher deve restare bloccato. Anche con esito positivo non esiste ancora un publisher reale: questo strumento non arma finestre operative e non scrive nel perimetro pubblico.
+
+Prima di considerare la barriera operativa occorre verificare sul dominio la stessa SAPI/pool PHP, permessi effettivi, `open_basedir`, cache proxy/page cache, OPcache e realpath cache. In particolare una cache che risponde senza eseguire WordPress può aggirare il MU-plugin; le richieste di file statici non sono bloccate. Verificare la coerenza del codice eseguito con OPcache e il drain di richieste già attive. L'header e il 503 vanno provati solo nel banco HTTP isolato descritto sopra. Restano inoltre obbligatori pinning WordPress della release per richiesta, fault/recovery, backup fresco verificato, journal, health check e rollback. La CI offline non dimostra nessuno di questi comportamenti IONOS.
