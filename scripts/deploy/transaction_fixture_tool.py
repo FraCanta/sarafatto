@@ -71,6 +71,17 @@ def _safe_relative(path):
     return path
 
 
+def _safe_directory(relative):
+    """Valida i soli contenitori necessari per raggiungere file gestiti."""
+    return (
+        relative in ("themes", "plugins", "mu-plugins")
+        or relative == "themes/sarafatto"
+        or relative.startswith("themes/sarafatto/")
+        or relative == "plugins/sarafatto-core"
+        or relative.startswith("plugins/sarafatto-core/")
+    )
+
+
 def _within(path, root):
     try:
         return os.path.commonpath((str(path), str(root))) == str(root)
@@ -411,17 +422,21 @@ def _inventory(root, root_fd, reject_node_modules=False):
                 if reject_node_modules:
                     raise TransactionError("node_modules non può essere incluso nell'artefatto fixture.")
                 continue
-            _safe_relative(relative)
             info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
                 raise TransactionError(f"Symlink fixture vietato: {relative}.")
             if stat.S_ISDIR(info.st_mode):
+                if not _safe_directory(relative) or baseline.excluded(relative):
+                    raise TransactionError(f"Directory contenitore fuori allowlist: {relative}.")
                 child_fd = _open_dir(directory_fd, name)
                 try:
                     visit(child_fd, relative)
                 finally:
                     os.close(child_fd)
-            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+            elif stat.S_ISREG(info.st_mode):
+                _safe_relative(relative)
+                if info.st_nlink != 1:
+                    raise TransactionError(f"Hard link sospetto vietato: {relative}.")
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
                 try:
                     opened = os.fstat(fd)

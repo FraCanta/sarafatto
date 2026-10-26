@@ -204,6 +204,63 @@ class TransactionFixtureTests(unittest.TestCase):
         self.assertFalse(any("node_modules" in row["path"] for row in self.plan["artifact_files"]))
         self.assertEqual(len(self.plan["plan_sha256"]), 64)
 
+    def test_01a_mu_plugins_e_contenitore_valido_ma_non_inventariato(self):
+        records = tx._tree_inventory(self.workspace.public_root)
+        self.assertIn(baseline.SINGLE_FILE, records)
+        self.assertNotIn("mu-plugins", records)
+        self.assertNotIn("themes", records)
+        self.assertNotIn("plugins", records)
+
+    def test_01b_solo_il_mu_plugin_autorizzato_e_un_file_gestito(self):
+        self.assertTrue(baseline.safe_path(baseline.SINGLE_FILE))
+        self.assertFalse(baseline.safe_path("mu-plugins/other.php"))
+        self.assertFalse(baseline.safe_path("mu-plugins/sarafatto-polylang-front-page-url.php/child.php"))
+
+    def test_01c_file_estraneo_in_mu_plugins_rifiutato(self):
+        extra = self.workspace.public_root / "mu-plugins/other.php"
+        extra.write_text("not managed", encoding="utf-8")
+        with self.assertRaisesRegex(tx.TransactionError, "allowlist"):
+            tx._tree_inventory(self.workspace.public_root)
+
+    def test_01d_symlink_directory_mu_plugins_rifiutato(self):
+        directory = self.workspace.public_root / "mu-plugins"
+        saved = self.workspace.public_root / "mu-plugins-saved"
+        directory.rename(saved)
+        directory.symlink_to(saved, target_is_directory=True)
+        with self.assertRaisesRegex(tx.TransactionError, "Symlink"):
+            tx._tree_inventory(self.workspace.public_root)
+
+    def test_01e_mu_plugin_autorizzato_sostituito_da_symlink_rifiutato(self):
+        target = self.workspace.public_root / "plugins/sarafatto-core/plugin.php"
+        allowed = self.workspace.public_root / baseline.SINGLE_FILE
+        allowed.unlink()
+        allowed.symlink_to(target)
+        with self.assertRaisesRegex(tx.TransactionError, "Symlink"):
+            tx._tree_inventory(self.workspace.public_root)
+
+    def test_01f_themes_e_plugins_attraversabili_solo_per_componenti_gestiti(self):
+        records = tx._tree_inventory(self.workspace.public_root)
+        self.assertIn("themes/sarafatto/front-page.php", records)
+        self.assertIn("plugins/sarafatto-core/plugin.php", records)
+        for path in ("themes/other/file.php", "plugins/other/file.php"):
+            self._write_tree_file(self.workspace.public_root, path, b"outside allowlist")
+            with self.subTest(path=path), self.assertRaisesRegex(tx.TransactionError, "allowlist"):
+                tx._tree_inventory(self.workspace.public_root)
+            (self.workspace.public_root / path).unlink()
+
+    def test_01g_percorso_fuori_allowlist_rifiutato(self):
+        for path in ("mu-plugins/other.php", "themes/other/file.php", "plugins/other/file.php"):
+            with self.subTest(path=path), self.assertRaisesRegex(tx.TransactionError, "allowlist"):
+                tx._safe_relative(path)
+
+    def test_01h_collisioni_file_directory_mu_plugins_rifiutate(self):
+        directory = self.workspace.public_root / "mu-plugins"
+        saved = self.workspace.public_root / "mu-plugins-saved"
+        directory.rename(saved)
+        directory.write_text("collision", encoding="utf-8")
+        with self.assertRaisesRegex(tx.TransactionError, "allowlist"):
+            tx._tree_inventory(self.workspace.public_root)
+
     def test_02_commit_errato_e_quota_insufficiente_bloccano(self):
         with self.assertRaises(tx.TransactionError):
             self.preflight(authorized_commit_sha="c" * 40)
