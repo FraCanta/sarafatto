@@ -286,6 +286,12 @@ class TransactionFixtureTests(unittest.TestCase):
         doc = json.loads(manifest.read_text(encoding="utf-8"))
         doc.pop(tx.ENTRYPOINTS[0])
         manifest.write_text(json.dumps(doc), encoding="utf-8")
+        # Mantiene coerente l'inventario autorizzato con i byte della fixture,
+        # così il preflight raggiunge davvero la verifica semantica del manifest.
+        records = tx._tree_inventory(self.workspace.artifact_root)
+        self.inventory_path.write_text("".join(
+            f"{row['sha256']}\t{row['size']}\t{path}\n" for path, row in sorted(records.items())
+        ), encoding="utf-8")
         with self.assertRaisesRegex(tx.TransactionError, "Entry Vite mancante"):
             self.preflight()
 
@@ -317,7 +323,7 @@ class TransactionFixtureTests(unittest.TestCase):
         outside.write_bytes(b"outside")
         hardlink = self.workspace.public_root / "themes/sarafatto/hard.php"
         os.link(outside, hardlink)
-        with self.assertRaisesRegex(tx.TransactionError, "hard link"):
+        with self.assertRaisesRegex(tx.TransactionError, "(?i)hard link"):
             tx._tree_inventory(self.workspace.public_root)
         hardlink.unlink()
         if hasattr(os, "mkfifo"):
@@ -399,6 +405,29 @@ class TransactionFixtureTests(unittest.TestCase):
         approved = self.approved_plan()
         self.assertEqual(approved["removal_approvals"]["themes/sarafatto/obsolete.php"],
                          self.plan["files_candidate_for_removal"][0]["sha256"])
+
+    def test_08a_approvazione_forgiata_non_supera_digest_o_prova_originale(self):
+        path = self.plan["files_candidate_for_removal"][0]["path"]
+        sha_value = self.plan["files_candidate_for_removal"][0]["sha256"]
+        forged = dict(self.plan)
+        forged["removal_approvals"] = {path: sha_value}
+        unsigned = dict(forged)
+        unsigned.pop("plan_sha256", None)
+        forged["plan_sha256"] = tx._json_digest(unsigned)
+        with self.assertRaises(tx.TransactionError):
+            tx._validate_plan(forged)
+        with self.assertRaises(tx.TransactionError):
+            tx.approve_fixture_removals(
+                forged, [path], confirmation="APPROVE-FIXTURE-REMOVALS " + forged["plan_sha256"])
+
+        approved = self.approved_plan()
+        changed = dict(approved)
+        changed["files_candidate_for_removal"] = []
+        changed_unsigned = dict(changed)
+        changed_unsigned.pop("plan_sha256", None)
+        changed["plan_sha256"] = tx._json_digest(changed_unsigned)
+        with self.assertRaises(tx.TransactionError):
+            tx._validate_plan(changed)
 
     def test_09_backup_mancante_corrotto_e_extra_verificati(self):
         with self.assertRaises(tx.TransactionError):
@@ -622,12 +651,27 @@ class TransactionFixtureTests(unittest.TestCase):
 
     def test_16_rimozione_non_approvata_non_pubblica(self):
         backup = self.backup()
-        with self.assertRaisesRegex(tx.TransactionError, "approvazione separata"):
+        before = tx._tree_inventory(self.workspace.public_root)
+        with self.assertRaises(tx.TransactionError):
             tx.simulate_publish(
                 self.workspace, self.plan, authorized_commit_sha=CANDIDATE_SHA,
                 backup_id=backup["backup_id"], backup_sha256=backup["backup_sha256"],
                 confirmation="PUBLISH-FIXTURE " + self.plan["plan_sha256"], health_check="passed")
         self.assertTrue((self.workspace.public_root / "themes/sarafatto/obsolete.php").exists())
+        self.assertEqual(tx._tree_inventory(self.workspace.public_root), before)
+        self.assertEqual(tx._load_fixture_journal(self.workspace), [])
+
+        path = self.plan["files_candidate_for_removal"][0]["path"]
+        forged = dict(self.plan)
+        forged["removal_approvals"] = {
+            row["path"]: row["sha256"] for row in self.plan["files_candidate_for_removal"]
+        }
+        unsigned = dict(forged)
+        unsigned.pop("plan_sha256", None)
+        forged["plan_sha256"] = tx._json_digest(unsigned)
+        with self.assertRaises(tx.TransactionError):
+            tx.approve_fixture_removals(
+                forged, [path], confirmation="APPROVE-FIXTURE-REMOVALS " + forged["plan_sha256"])
 
 
 if __name__ == "__main__":

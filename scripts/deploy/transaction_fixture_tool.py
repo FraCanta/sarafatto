@@ -9,11 +9,13 @@ import base64
 import ctypes
 import errno
 import hashlib
+import hmac
 import json
 import os
 import pathlib
 import re
 import shutil
+import secrets
 import stat
 import tempfile
 import uuid
@@ -37,6 +39,7 @@ ENTRYPOINTS = (
 )
 MAX_JSON = 32 * 1024 * 1024
 TOKEN = object()
+_REMOVAL_APPROVAL_KEY = secrets.token_bytes(32)
 
 
 class TransactionError(Exception):
@@ -702,7 +705,6 @@ def preflight(workspace, *, artifact_inventory_path, artifact_commit_sha,
             replacements.append({"path": path, "before": prior, "after": row})
     removals = [row for path, row in sorted(existing.items())
                 if row.get("classification") == "artifact" and path not in candidate]
-    approvals = {}
     approved_extras = [row for _, row in sorted(extras.items())]
     old_bytes = sum(row["size"] for row in existing.values())
     new_bytes = sum(row["size"] for row in candidate.values())
@@ -727,7 +729,8 @@ def preflight(workspace, *, artifact_inventory_path, artifact_commit_sha,
         "files_to_keep": retained,
         "files_candidate_for_removal": removals,
         "approved_extras": approved_extras,
-        "removal_approvals": sorted(approvals),
+        "removal_approvals": {},
+        "removal_approval_proof": None,
         "backup": {"required": True, "verified_before_publish": True},
         "space": {"old_bytes": old_bytes, "candidate_bytes": new_bytes,
                   "required_bytes": required_bytes, "quota_free_bytes": quota_free_bytes,
@@ -751,7 +754,16 @@ def approve_fixture_removals(plan, paths, *, confirmation):
     if not requested or not requested.issubset(candidates):
         raise TransactionError("Rimozione non candidata o approvazione vuota.")
     approved = dict(plan)
-    approved["removal_approvals"] = {path: candidates[path]["sha256"] for path in sorted(requested)}
+    approvals = {path: candidates[path]["sha256"] for path in sorted(requested)}
+    approved["removal_approvals"] = approvals
+    proof_body = {"plan_sha256": plan["plan_sha256"], "approvals": approvals}
+    proof_digest = _json_digest(proof_body)
+    approved["removal_approval_proof"] = {
+        "base_plan_sha256": plan["plan_sha256"],
+        "hmac_sha256": hmac.new(
+            _REMOVAL_APPROVAL_KEY, proof_digest.encode("ascii"), hashlib.sha256
+        ).hexdigest(),
+    }
     approved.pop("plan_sha256", None)
     approved["plan_sha256"] = _json_digest(approved)
     return approved
@@ -766,12 +778,46 @@ def _validate_plan(plan):
     if not re.fullmatch(r"[a-f0-9]{64}", str(digest or "")) or _json_digest(unsigned) != digest:
         raise TransactionError("Digest del piano non valido.")
     approvals = plan.get("removal_approvals")
-    candidates = {row.get("path"): row.get("sha256") for row in plan.get("files_candidate_for_removal", [])}
-    if not isinstance(approvals, dict) or any(
-            path not in candidates or digest_value != candidates[path]
-            or not baseline.safe_path(path) or baseline.excluded(path)
-            for path, digest_value in approvals.items()):
+    removals = plan.get("files_candidate_for_removal")
+    if not isinstance(removals, list) or not isinstance(approvals, dict):
         raise TransactionError("Approvazioni rimozione del piano non valide.")
+    candidates = {}
+    for row in removals:
+        if not isinstance(row, dict):
+            raise TransactionError("Rimozione candidata malformata.")
+        path, sha_value = row.get("path"), row.get("sha256")
+        if (not isinstance(path, str) or not baseline.safe_path(path) or baseline.excluded(path)
+                or not re.fullmatch(r"[a-f0-9]{64}", str(sha_value or ""))
+                or path in candidates):
+            raise TransactionError("Rimozione candidata fuori allowlist, duplicata o malformata.")
+        candidates[path] = sha_value
+    if any(path not in candidates or digest_value != candidates[path]
+           for path, digest_value in approvals.items()):
+        raise TransactionError("Approvazioni rimozione non corrispondenti ai file candidati.")
+
+    proof = plan.get("removal_approval_proof")
+    if not approvals:
+        if proof is not None:
+            raise TransactionError("Prova di approvazione presente senza rimozioni autorizzate.")
+        return
+    if (not isinstance(proof, dict) or set(proof) != {"base_plan_sha256", "hmac_sha256"}
+            or not re.fullmatch(r"[a-f0-9]{64}", str(proof.get("base_plan_sha256", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(proof.get("hmac_sha256", "")))):
+        raise TransactionError("Prova di approvazione rimozioni assente o malformata.")
+    # Ricostruisce il digest del piano originale rimuovendo esclusivamente i
+    # campi aggiunti dal passaggio esplicito di approvazione.
+    original = dict(plan)
+    original.pop("plan_sha256", None)
+    original["removal_approvals"] = {}
+    original["removal_approval_proof"] = None
+    original_sha = _json_digest(original)
+    proof_body = {"plan_sha256": original_sha, "approvals": approvals}
+    expected_proof = hmac.new(
+        _REMOVAL_APPROVAL_KEY, _json_digest(proof_body).encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if (proof.get("base_plan_sha256") != original_sha
+            or not hmac.compare_digest(proof.get("hmac_sha256", ""), expected_proof)):
+        raise TransactionError("Approvazione non legata al piano originale o alterata.")
 
 
 def _write_journal_event(workspace, operation_id, status, details, *, verified_commit=False,
