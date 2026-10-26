@@ -85,17 +85,20 @@ function sarafatto_deploy_barrier_bootstrap() {
 	if ( 'cli' === PHP_SAPI ) {
 		return;
 	}
-	if ( $sarafatto_deploy_barrier_status['window_armed'] && 'production' !== $environment ) {
-		// An armed operation marker takes precedence over environment misconfiguration.
+	if ( $sarafatto_deploy_barrier_status['window_armed'] ) {
 		sarafatto_deploy_barrier_maintenance_response();
 	}
 	if ( 'production' !== $environment ) {
+		// Recheck before leaving the opt-in path in case a window was just armed.
+		if ( sarafatto_deploy_barrier_window_is_armed() ) {
+			sarafatto_deploy_barrier_maintenance_response();
+		}
 		return;
 	}
 
 	$config = sarafatto_deploy_barrier_configuration();
 	if ( ! is_array( $config ) ) {
-		if ( $sarafatto_deploy_barrier_status['window_armed'] ) {
+		if ( sarafatto_deploy_barrier_window_is_armed() ) {
 			sarafatto_deploy_barrier_maintenance_response();
 		}
 		return;
@@ -114,6 +117,14 @@ function sarafatto_deploy_barrier_bootstrap() {
 		&& $before['dev'] === $opened['dev'] && $before['ino'] === $opened['ino'];
 
 	if ( $valid && flock( $handle, LOCK_SH | LOCK_NB ) ) {
+		// Pair the initial marker check with this post-lock check. If the marker
+		// appeared meanwhile, release the reader before denying the request.
+		$sarafatto_deploy_barrier_status['window_armed'] = sarafatto_deploy_barrier_window_is_armed();
+		if ( $sarafatto_deploy_barrier_status['window_armed'] ) {
+			flock( $handle, LOCK_UN );
+			fclose( $handle );
+			sarafatto_deploy_barrier_maintenance_response();
+		}
 		$sarafatto_deploy_barrier_status['lock_accessible'] = true;
 		if ( $config['enabled'] ) {
 			$sarafatto_deploy_barrier_status['lock_acquired'] = true;
@@ -133,6 +144,7 @@ function sarafatto_deploy_barrier_bootstrap() {
 	if ( is_resource( $handle ) ) {
 		fclose( $handle );
 	}
+	$sarafatto_deploy_barrier_status['window_armed'] = sarafatto_deploy_barrier_window_is_armed();
 	if ( $sarafatto_deploy_barrier_status['window_armed'] ) {
 		sarafatto_deploy_barrier_maintenance_response();
 	}

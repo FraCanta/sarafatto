@@ -344,6 +344,8 @@ Il MU-plugin conserva il filtro Polylang esistente. La barriera è disattivata i
 
 Il lock PHP è distinto da `site-operation.lock`: quest'ultimo coordina strumenti CLI, mentre `web-request.lock` coordina le richieste web. La disponibilità e i permessi del file per l'utente PHP sono prerequisiti da provare dalla SAPI web. Non allargare permessi automaticamente. La configurazione prevista è `0600`, così come il lock; se l'utente PHP non può accedervi, non attivare la barriera. Un errore senza marker lascia il sito nel comportamento preesistente e la verifica deve fallire; ciò non autorizza il publisher.
 
+L'ordine lato richiesta è deliberato: controlla il marker prima di qualunque percorso normale; dopo aver acquisito `LOCK_SH`, ricontrolla il marker prima di proseguire. Se il marker è comparso fra i due controlli, rilascia subito il lock e risponde 503 anche se `flock` era riuscito. Se viene armato dopo il secondo controllo, la richiesta ha già il lock condiviso e il publisher deve attendere che termini. L'ordine lato publisher deve essere: creare il marker con `O_EXCL` e sincronizzarlo; acquisire `LOCK_EX` con timeout finito; verificare via HTTP l'interlock prima delle scritture. A operazione conclusa, rilasciare `LOCK_EX` e soltanto dopo rimuovere il marker. Rimuoverlo mentre si detiene ancora l'esclusivo lascerebbe una finestra in cui una richiesta vedrebbe marker assente ma non potrebbe acquisire `LOCK_SH`.
+
 ### Preparazione e verifica manuale
 
 I comandi seguenti sono **solo istruzioni**, non sono stati eseguiti. Richiedono che gli strumenti siano già presenti nel checkout privato IONOS e che le directory private `state/` e `locks/` esistano con owner/modalità attesi.

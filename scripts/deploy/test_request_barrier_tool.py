@@ -133,9 +133,19 @@ class BarrierContractTests(unittest.TestCase):
         # Fuori dalla finestra armata, i problemi di lock non emettono 503.
         self.assertIn("if ( $sarafatto_deploy_barrier_status['window_armed'] )", source)
         self.assertLess(
-            source.index("if ( $sarafatto_deploy_barrier_status['window_armed'] && 'production' !== $environment )"),
+            source.index("if ( $sarafatto_deploy_barrier_status['window_armed'] )"),
             source.index("$config = sarafatto_deploy_barrier_configuration();"),
         )
+        lock_success = source.index("if ( $valid && flock( $handle, LOCK_SH | LOCK_NB ) )")
+        marker_recheck = source.index(
+            "$sarafatto_deploy_barrier_status['window_armed'] = sarafatto_deploy_barrier_window_is_armed();",
+            lock_success,
+        )
+        shutdown_registration = source.index("register_shutdown_function(", lock_success)
+        self.assertLess(marker_recheck, shutdown_registration)
+        self.assertLess(source.index("flock( $handle, LOCK_UN );", marker_recheck),
+                        source.index("sarafatto_deploy_barrier_maintenance_response();", marker_recheck))
+        self.assertIn("$sarafatto_deploy_barrier_status['window_armed'] = sarafatto_deploy_barrier_window_is_armed();\n\tif ( $sarafatto_deploy_barrier_status['window_armed'] )", source)
         self.assertNotIn("sarafatto_deploy_barrier_maintenance_response();\n\t}\n\treturn;", source)
 
 
@@ -276,6 +286,58 @@ class PosixLockTests(unittest.TestCase):
         with barrier.locked_file(self.lock, "exclusive", timeout=0.1):
             exclusive_acquired.append(True)
         self.assertEqual(exclusive_acquired, [False, True])
+
+    def test_marker_presente_con_lock_libero_o_occupato_blocca_nuova_richiesta(self):
+        marker = self.state / "request-deploy-window.json"
+
+        def simulated_request():
+            if marker.exists():
+                return "503"
+            try:
+                with barrier.locked_file(self.lock, "shared", timeout=0):
+                    if marker.exists():
+                        return "503"
+                    return "continue"
+            except TimeoutError:
+                return "503" if marker.exists() else "continue"
+
+        marker.write_text('{"schema_version":1}', encoding="ascii")
+        self.assertEqual(simulated_request(), "503")
+        # Il rifiuto prima del lock non lascia un reader che blocchi il publisher.
+        with barrier.locked_file(self.lock, "exclusive", timeout=0.1):
+            self.assertEqual(simulated_request(), "503")
+
+    def test_marker_armato_dopo_lock_shared_rifiuta_e_drena_il_reader(self):
+        marker = self.state / "request-deploy-window.json"
+        reader_locked = threading.Event()
+        marker_armed = threading.Event()
+        result = []
+
+        def simulated_request():
+            if marker.exists():
+                result.append("503-before-lock")
+                return
+            with barrier.locked_file(self.lock, "shared", timeout=0.1):
+                reader_locked.set()
+                self.assertTrue(marker_armed.wait(1))
+                if marker.exists():
+                    result.append("503-after-lock")
+                    return
+                result.append("continue")
+
+        worker = threading.Thread(target=simulated_request)
+        worker.start()
+        self.assertTrue(reader_locked.wait(1))
+        marker.write_text('{"schema_version":1}', encoding="ascii")
+        with self.assertRaises(TimeoutError):
+            with barrier.locked_file(self.lock, "exclusive", timeout=0.05):
+                self.fail("Il publisher non deve superare un reader già attivo.")
+        marker_armed.set()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, ["503-after-lock"])
+        with barrier.locked_file(self.lock, "exclusive", timeout=0.1):
+            pass
 
 
 if __name__ == "__main__":
