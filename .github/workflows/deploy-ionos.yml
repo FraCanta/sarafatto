@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      run_remote_state_inspection:
+        description: Ispezione read-only di baseline, current-release e filesystem IONOS (richiede i Secrets SSH)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,11 +51,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py")]'
+          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py", "scripts/deploy/production_adapter.py", "scripts/deploy/test_production_adapter.py")]'
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_backup_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_release_state_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_transaction_fixture_tool.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
           bash scripts/deploy/test-preview-fixtures.sh
           bash scripts/deploy/test-baseline-inventory-fixture.sh
 
@@ -163,3 +169,52 @@ jobs:
           SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/sarafatto-ssh/known_hosts
         shell: bash
         run: bash scripts/deploy/compare-remote.sh
+
+  remote-state-inspection:
+    needs: [validate, build-artifact]
+    if: inputs.run_remote_state_inspection == true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verifica branch e SHA autorizzato
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "L'ispezione è consentita solo da main." >&2; exit 1; }
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ && "$RELEASE_SHA" == "$GITHUB_SHA" ]] || { echo 'SHA autorizzato non valido o diverso dal dispatch.' >&2; exit 1; }
+      - name: Installa credenziali SSH effimere
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 "$RUNNER_TEMP/sarafatto-state-ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/sarafatto-state-ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/sarafatto-state-ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/sarafatto-state-ssh/id_ed25519" "$RUNNER_TEMP/sarafatto-state-ssh/known_hosts"
+      - name: Ispezione remota read-only
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IONOS_SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$IONOS_SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$IONOS_SSH_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( IONOS_SSH_PORT >= 1 && IONOS_SSH_PORT <= 65535 ))
+          ssh -T -p "$IONOS_SSH_PORT" \
+            -i "$RUNNER_TEMP/sarafatto-state-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/sarafatto-state-ssh/known_hosts" \
+            -o ConnectTimeout=15 \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
+            "cd /home/www/sarafatto-repo && GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/production_adapter.py inspect --authorized-sha '$RELEASE_SHA'"

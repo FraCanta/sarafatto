@@ -208,3 +208,47 @@ La salute è un input enum locale (`passed`, `failed`, `unavailable`), non un ca
 Il job `validate` esegue `test_transaction_fixture_tool.py` su Ubuntu con `SARAFATTO_REQUIRE_FLOCK=1`; qualunque skip POSIX fa fallire la suite. I test usano solo directory temporanee locali e non richiedono Secrets né SSH. La CI deve ancora confermare l'esecuzione Linux prima che il codice sia considerato validato.
 
 Queste fasi non abilitano deploy o rollback reali, non modificano i file applicativi e non aggiornano `current-release.json`. Le simulazioni non garantiscono il corretto funzionamento di WordPress durante una pubblicazione reale. Prima di abilitare una futura modalità di produzione serviranno almeno: revisione indipendente del protocollo e delle race sul filesystem IONOS, verifica controllata delle primitive del filesystem, barriera di manutenzione o strategia verificata contro versioni miste, health check reale approvato, aggiornamento atomico dello stato corrente, backup applicativo e database separati, approvazione esplicita, recupero/rollback testato e workflow produzione isolato con permessi minimi. Nessuno di questi adattatori o job è incluso qui.
+
+## Fase 3D.4 — ispezione remota protetta e blocco delle scritture pubbliche
+
+`scripts/deploy/production_adapter.py` è un adattatore **solo read-only**. La CLI espone esclusivamente `inspect --authorized-sha <40 caratteri>`; non esistono sottocomandi bootstrap, publish, deploy o rollback. L'adattatore usa percorsi IONOS fissi, rifiuta componenti symlink, verifica che il repository remoto sia esattamente allo SHA autorizzato e che i sorgenti di controllo corrispondano ai blob Git. Verifica la baseline con lo SHA ufficiale, legge `current-release.json` e il journal senza seguire symlink, acquisisce un lock condiviso non bloccante e confronta due inventari pubblici freschi. Se lo stato corrente manca, restituisce `bootstrap-required` e termina con codice 3. In ogni caso `publish_allowed` resta `false`.
+
+### Workflow manuale
+
+Il workflow mantiene il solo trigger `workflow_dispatch`. `run_remote_state_inspection` è facoltativo e disattivato per default; se abilitato esegue solo `production_adapter.py inspect` via SSH, con chiave e host verificato, e non scrive sul server. Richiede che il repository IONOS sia stato aggiornato manualmente allo SHA del dispatch; altrimenti il controllo fallisce. Non avvia bootstrap, backup, staging o operazioni pubbliche. La build dell'artefatto e il job `remote-dry-run` restano separati.
+
+### Runbook e classi di operazione
+
+**Sola lettura** — da eseguire manualmente via SSH oppure con il dispatch read-only dopo aver verificato lo SHA:
+
+~~~bash
+cd /home/www/sarafatto-repo
+GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/production_adapter.py inspect \
+  --authorized-sha 'SHA_COMPLETO_DEL_COMMIT'
+~~~
+
+Il comando controlla baseline, repository, journal e filesystem. Non crea report su disco. Un `bootstrap-required`, una baseline diversa, un journal irrisolto, un lock occupato o differenze nei file impediscono di considerare lo stato verificato.
+
+**Scritture solo nell'area privata** — il bootstrap dello stato corrente è separato e richiede autorizzazione esplicita. Non viene eseguito dal workflow né dall'adattatore:
+
+~~~bash
+python3 /home/www/sarafatto-repo/scripts/deploy/release_state_tool.py bootstrap \
+  --confirm-bootstrap 'INITIALIZE-CURRENT 07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd'
+~~~
+
+Questo comando scrive esclusivamente `current-release.json` sotto `state/` e non modifica WordPress pubblico. Prima va acquisito e revisionato l'output di `inspect`; se la baseline o i due inventari non corrispondono, non procedere. Il comando già documentato `backup_tool.py backup` crea uno snapshot privato con lock esclusivo; verificarlo subito con `backup_tool.py verify`, conservando separatamente ID e digest del manifest. `restore-test` scrive solo sotto `staging/`. Questi comandi non sono invocati da questa integrazione GitHub.
+
+**Scritture pubbliche** — non sono implementate né invocabili. Il workflow non contiene un job di deploy o rollback, non usa `rsync` per copiare file e non esegue cancellazioni. Non esiste ancora un verificatore che promuova `current-release.json` a una release successiva; la validazione dello stato corrente accetta solo il bootstrap iniziale.
+
+### Gate obbligatori per un futuro workflow di pubblicazione
+
+Prima di aggiungere un job reale dovranno essere implementati e testati insieme: SHA completo vincolato al ref `main`; artefatto scaricato e verificato byte per byte; Environment GitHub con revisori obbligatori configurati; preflight remoto e piano JSON il cui digest venga approvato; backup fresco verificato con ID e SHA indipendenti; acquisizione di `site-operation.lock` mantenuta per l'intera transazione; ricontrollo dell'inventario immediatamente prima e dopo le scritture; health check HTTP reale e controlli applicativi approvati; aggiornamento atomico e verificabile dello stato release; rollback vincolato a transazione, backup e digest; report con ogni file interessato. L'approvazione GitHub e la conferma del piano devono essere distinte dalla selezione dello SHA.
+
+### Barriera contro versioni miste e compatibilità IONOS
+
+Non è ancora dimostrabile che le richieste WordPress non possano osservare file appartenenti a release differenti. La sostituzione file per file consente uno stato misto durante la transazione; il lock applicativo non blocca le richieste web già in corso. Un flag `.maintenance` può fermare nuove richieste secondo il comportamento WordPress, ma non drena processi PHP avviati prima del flag e non prova la coerenza di OPcache o di tutti i worker. Uno switch atomico del solo symlink del tema non include plugin e MU-plugin; sostituire il symlink dell'intero `wp-content` rischierebbe di coinvolgere `uploads`, plugin/temi esterni e altri contenuti esclusi. Non adottare nessuna di queste ipotesi senza verifiche IONOS e un protocollo che copra tutti i componenti.
+
+La compatibilità del filesystem IONOS non è confermata da test sul runner GitHub. I test esistenti coprono fallback e collisioni su filesystem di test, ma non dimostrano il comportamento del Ceph dell'hosting, le semantiche di rename/fsync, OPcache o la risoluzione dei symlink in PHP. Prima di autorizzare scritture servono prove circoscritte in area privata IONOS, senza percorsi pubblici, per le primitive usate; i risultati devono essere registrati e revisionati. Anche questo non autorizza da solo il deploy.
+
+Fino alla soluzione della barriera contro le versioni miste, alla verifica controllata delle primitive IONOS e all'implementazione dei gate sopra, il deploy e il rollback reali restano bloccati. La Fase 4A e i relativi asset non fanno parte di questa pipeline.
