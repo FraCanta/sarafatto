@@ -1125,7 +1125,11 @@ def simulate_publish(workspace, plan, *, authorized_commit_sha, backup_id, backu
     if fcntl is None:
         raise TransactionError("flock non disponibile.")
     locks_fd = os.open(workspace.locks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+    try:
+        lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+    except baseline.BaselineError as exc:
+        os.close(locks_fd)
+        raise TransactionError("Lock fixture occupato o non acquisibile; operazione rifiutata.") from exc
     started = False
     try:
         events = _load_fixture_journal(workspace)

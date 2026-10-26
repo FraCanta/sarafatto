@@ -608,6 +608,23 @@ class TransactionFixtureTests(unittest.TestCase):
             os.close(locks_fd)
         backup = self.backup()
         plan = self.approved_plan()
+        before = tx._tree_inventory(self.workspace.public_root)
+        lock_dir_fd = os.open(self.workspace.locks_dir, os.O_RDONLY | os.O_DIRECTORY)
+        held_fd = baseline.acquire_baseline_lock(None, lock_dir_fd)
+        try:
+            with self.assertRaises(tx.TransactionError) as caught:
+                tx.simulate_publish(
+                    self.workspace, plan, authorized_commit_sha=CANDIDATE_SHA,
+                    backup_id=backup["backup_id"], backup_sha256=backup["backup_sha256"],
+                    confirmation="PUBLISH-FIXTURE " + plan["plan_sha256"], health_check="passed")
+            self.assertIsInstance(caught.exception.__cause__, baseline.BaselineError)
+            self.assertEqual(tx._tree_inventory(self.workspace.public_root), before)
+            self.assertEqual(tx._load_fixture_journal(self.workspace), [])
+        finally:
+            tx.fcntl.flock(held_fd, tx.fcntl.LOCK_UN)
+            os.close(held_fd)
+            os.close(lock_dir_fd)
+
         barrier = threading.Barrier(2)
         results = []
 
@@ -618,7 +635,7 @@ class TransactionFixtureTests(unittest.TestCase):
                     self.workspace, plan, authorized_commit_sha=CANDIDATE_SHA,
                     backup_id=backup["backup_id"], backup_sha256=backup["backup_sha256"],
                     confirmation="PUBLISH-FIXTURE " + plan["plan_sha256"], health_check="passed"))
-            except tx.TransactionError as exc:
+            except (tx.TransactionError, baseline.BaselineError) as exc:
                 results.append(exc)
 
         workers = [threading.Thread(target=publish_worker) for _ in range(2)]
@@ -627,8 +644,18 @@ class TransactionFixtureTests(unittest.TestCase):
         for worker in workers:
             worker.join(timeout=10)
         self.assertTrue(all(not worker.is_alive() for worker in workers))
-        self.assertEqual(sum(isinstance(item, dict) for item in results), 1)
+        successful = [item for item in results if isinstance(item, dict)]
+        self.assertLessEqual(len(successful), 1)
+        self.assertEqual(len(successful), 1)
+        self.assertEqual(sum(isinstance(item, tx.TransactionError) for item in results), 1)
         self.assertEqual(len(results), 2)
+
+        # Il descriptor e il flock acquisiti dal publish concluso devono essere rilasciati.
+        lock_dir_fd = os.open(self.workspace.locks_dir, os.O_RDONLY | os.O_DIRECTORY)
+        released_fd = baseline.acquire_baseline_lock(None, lock_dir_fd)
+        tx.fcntl.flock(released_fd, tx.fcntl.LOCK_UN)
+        os.close(released_fd)
+        os.close(lock_dir_fd)
 
     def test_14_operazione_committed_arbitraria_rifiutata(self):
         state_fd = os.open(self.workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
