@@ -630,6 +630,65 @@ class BackupToolTests(unittest.TestCase):
                                       private_root=self.private, expected_private_root=self.private)
 
 
+    @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
+    def test_current_release_supporta_nuovi_backup_e_backup_storici(self):
+        historical = self.create()
+        state_module = backup_tool.release_state
+        with mock.patch.object(state_module, "INITIAL_BASELINE_SHA256", self.baseline_sha):
+            bootstrap = state_module.bootstrap_current_release(
+                private_root=self.private, expected_root=self.private,
+                inventory_reader=lambda _commit: self.inventory_text(),
+                confirmation="INITIALIZE-CURRENT " + self.baseline_sha,
+            )
+        self.assertEqual(bootstrap["status"], "bootstrapped")
+        old_check = backup_tool.verify_backup(
+            historical["backup_id"], self.baseline_sha, historical["manifest_sha256"],
+            private_root=self.private, expected_private_root=self.private,
+        )
+        self.assertEqual(old_check["status"], "verified")
+        current_id = "20261024T120009Z-abcdef123457"
+        current = self.create(backup_id=current_id)
+        result = backup_tool.verify_backup(
+            current_id, self.baseline_sha, current["manifest_sha256"],
+            private_root=self.private, expected_private_root=self.private,
+        )
+        self.assertEqual(result["status"], "verified")
+        manifest = json.loads((self.backups / current_id / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["reference_state"]["kind"], "current-release")
+        current_state_path = self.state / backup_tool.release_state.STATE_NAME
+        trusted_state = current_state_path.read_bytes()
+        forged = json.loads(trusted_state)
+        forged["reference_files"][0]["sha256"] = "0" * 64
+        forged["inventory"]["files"][0]["sha256"] = "0" * 64
+        forged["inventory_sha256"] = backup_tool.release_state.inventory_digest_json(forged["inventory"])
+        forged["release"]["inventory_sha256"] = forged["inventory_sha256"]
+        forged.pop("state_sha256")
+        forged["state_sha256"] = backup_tool.release_state.digest_json(forged)
+        current_state_path.write_bytes(backup_tool.release_state.json_bytes(forged))
+        current_state_path.chmod(0o600)
+        with self.assertRaisesRegex(backup_tool.BackupError, "fotografia iniziale verificata"):
+            self.create(backup_id="20261024T120011Z-abcdef123459")
+        current_state_path.write_bytes(trusted_state)
+        current_state_path.chmod(0o600)
+        state_fd = os.open(self.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        locks_fd = os.open(self.locks, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            backup_tool.release_state.append_operation_event(
+                state_fd, locks_fd, "txn-interrupted", "prepared", {"fixture": True})
+        finally:
+            os.close(locks_fd)
+            os.close(state_fd)
+        with self.assertRaisesRegex(backup_tool.BackupError, "(?i)operazione incompleta"):
+            self.create(backup_id="20261024T120010Z-abcdef123458")
+        before = list(self.staging.iterdir())
+        with self.assertRaisesRegex(backup_tool.BackupError, "(?i)operazione incompleta"):
+            backup_tool.restore_test(
+                current_id, self.baseline_sha, current["manifest_sha256"], 10**9,
+                private_root=self.private, expected_private_root=self.private,
+            )
+        self.assertEqual(list(self.staging.iterdir()), before)
+
+
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(BackupToolTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)

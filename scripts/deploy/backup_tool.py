@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 import baseline_tool as baseline
+import release_state_tool as release_state
 
 
 PRIVATE_ROOT = pathlib.Path("/home/www/sarafatto-deploy")
@@ -416,8 +417,8 @@ def archive_public_files(public_root, private_dir_fd, expected):
 
 
 def manifest_for(backup_id, baseline_sha, baseline_commit, baseline_document, expected,
-                 archive_size, archive_sha256):
-    return {
+                 archive_size, archive_sha256, reference_state=None):
+    manifest = {
         "schema_version": BACKUP_SCHEMA,
         "status": "complete",
         "backup_id": backup_id,
@@ -437,6 +438,62 @@ def manifest_for(backup_id, baseline_sha, baseline_commit, baseline_document, ex
                     "sha256": archive_sha256},
         "files": [expected[path] for path in sorted(expected)],
     }
+    if reference_state is not None:
+        manifest["reference_state"] = reference_state
+    return manifest
+
+
+def backup_reference(state_fd, baseline_document, baseline_digest, baseline_commit, baseline_expected):
+    """Usa solo baseline immutabile o current-release privato validato."""
+    try:
+        try:
+            os.stat(release_state.STATE_NAME, dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        else:
+            current = release_state.load_current_state(state_fd, baseline_digest)
+        events = release_state.read_journal_at(state_fd)
+        release_state.unresolved_operation(events)
+    except release_state.ReleaseStateError as exc:
+        raise BackupError(f"Stato release o journal non valido: {exc}") from exc
+    if current is None:
+        return baseline_commit, baseline_expected, None
+    provenance = current["provenance"]
+    baseline_release = baseline_document.get("release", {})
+    expected_snapshot = [baseline_expected[path] for path in sorted(baseline_expected)]
+    current_snapshot = current["reference_files"]
+    current_inventory_files = current["inventory"].get("files", [])
+    expected_inventory = [
+        {"path": path, **{key: baseline_expected[path][key] for key in ("sha256", "size", "mode")}}
+        for path in sorted(baseline_expected)
+    ]
+    if (provenance.get("kind") != "initial-baseline-content-match"
+            or provenance.get("baseline_provenance") != baseline_document.get("provenance")
+            or current["release"].get("commit_sha") != baseline_commit
+            or current["release"].get("release_id") != baseline_release.get("release_id")
+            or current_snapshot != expected_snapshot
+            or current_inventory_files != expected_inventory):
+        raise BackupError(
+            "Lo stato current-release non è una fotografia iniziale verificata della baseline; "
+            "serve il futuro aggiornamento legato a una transazione verificata."
+        )
+    rows = current["reference_files"]
+    expected = {row["path"]: row for row in rows}
+    if len(expected) != len(rows) or not expected:
+        raise BackupError("Snapshot file current-release non valido.")
+    info = current["release"]
+    if not re.fullmatch(r"[a-f0-9]{40}", info.get("commit_sha", "")):
+        raise BackupError("Commit registrato in current-release non valido.")
+    reference = {
+        "kind": "current-release",
+        "state_sha256": current["state_sha256"],
+        "inventory_sha256": current["inventory_sha256"],
+        "commit_sha": info["commit_sha"],
+        "release_id": info["release_id"],
+        "excluded_node_modules_files": current["inventory"]["exclusion"]["files"],
+        "excluded_node_modules_symlinks": current["inventory"]["exclusion"]["symlinks"],
+    }
+    return info.get("inventory_tool_commit", baseline_commit), expected, reference
 
 
 def safe_manifest_files(manifest):
@@ -607,8 +664,10 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
     temporary_fd = None
     try:
         assert_private_child_still_named(private, "locks")
-        document, baseline_digest, commit_sha, expected = validate_backup_baseline(
+        document, baseline_digest, baseline_commit, baseline_expected = validate_backup_baseline(
             None, baseline_sha256, state_fd=private["state_fd"])
+        inventory_commit, expected, reference_state = backup_reference(
+            private["state_fd"], document, baseline_digest, baseline_commit, baseline_expected)
         assert_private_child_still_named(private, "state")
         assert_private_root_still_named(private)
         assert_directory_still_named(private["root_fd"], "backups", private["backups_fd"], "backups")
@@ -618,7 +677,7 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
             pass
         else:
             raise BackupError("Backup ID già esistente: nessuna sovrascrittura consentita.")
-        first_text = inventory_text_for_backup(commit_sha)
+        first_text = inventory_text_for_backup(inventory_commit)
         files, symlinks, exclusion, first_digest = parse_inventory_text(first_text)
         summary = compare_inventory_to_baseline(files, symlinks, exclusion, expected)
         total_bytes = sum(row["size"] for row in expected.values())
@@ -637,8 +696,8 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
             archive_digest = hashlib.sha256()
             for block in iter(lambda: archive_stream.read(1024 * 1024), b""):
                 archive_digest.update(block)
-        manifest = manifest_for(backup_id, baseline_digest, commit_sha, document, expected,
-                                archive_info.st_size, archive_digest.hexdigest())
+        manifest = manifest_for(backup_id, baseline_digest, baseline_commit, document, expected,
+                                archive_info.st_size, archive_digest.hexdigest(), reference_state)
         raw = json_bytes(manifest)
         manifest_hash = hashlib.sha256(raw).hexdigest()
         write_at(temporary_fd, "manifest.json", raw)
@@ -649,7 +708,7 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
         verify_backup_directory(None, backup_id, baseline_digest, manifest_hash,
                                 require_complete=True, directory_fd=temporary_fd)
 
-        second_text = inventory_text_for_backup(commit_sha)
+        second_text = inventory_text_for_backup(inventory_commit)
         after_files, after_links, after_exclusion, second_digest = parse_inventory_text(second_text)
         compare_inventory_to_baseline(after_files, after_links, after_exclusion, expected)
         if first_digest != second_digest:
@@ -662,7 +721,9 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
             manifest_sha256=manifest_hash)
         os.fsync(private["backups_fd"])
         return {"backup_id": backup_id, "path": str(paths["backups"] / backup_id), "baseline_sha256": baseline_digest,
-                "baseline_commit": commit_sha, "files": summary["files"], "extras": summary["extras"],
+                "baseline_commit": baseline_commit,
+                "release_commit": reference_state["commit_sha"] if reference_state else baseline_commit,
+                "files": summary["files"], "extras": summary["extras"],
                 "bytes": total_bytes, "required_free_bytes": required,
                 "account_quota_free_bytes_confirmed": quota_free_bytes,
                 "archive_bytes": manifest["archive"]["size"], "manifest_sha256": manifest_hash,
@@ -884,8 +945,32 @@ def verify_manifest_matches_baseline(manifest, baseline_sha256, commit_sha, expe
             or manifest.get("baseline", {}).get("commit_sha") != commit_sha):
         raise BackupError("Backup appartenente a una baseline o release differente.")
     manifest_files, _ = safe_manifest_files(manifest)
-    if manifest_files != expected:
-        raise BackupError("Elenco, SHA-256, dimensioni o permessi del backup diversi dalla baseline approvata.")
+    reference = manifest.get("reference_state")
+    if reference is None:
+        # Compatibilità esplicita con i backup Fase 3C e con i backup pre-current-state.
+        if manifest_files != expected:
+            raise BackupError("Elenco, SHA-256, dimensioni o permessi del backup diversi dalla baseline approvata.")
+        return
+    if (not isinstance(reference, dict) or reference.get("kind") != "current-release"
+            or not re.fullmatch(r"[a-f0-9]{64}", str(reference.get("state_sha256", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(reference.get("inventory_sha256", "")))
+            or not re.fullmatch(r"[a-f0-9]{40}", str(reference.get("commit_sha", "")))
+            or not isinstance(reference.get("release_id"), str)
+            or not isinstance(reference.get("excluded_node_modules_files"), int)
+            or not isinstance(reference.get("excluded_node_modules_symlinks"), int)
+            or reference["excluded_node_modules_files"] < 0
+            or reference["excluded_node_modules_symlinks"] < 0):
+        raise BackupError("Riferimento current-release nel manifest non valido.")
+    inventory = {
+        "files": [{"path": path, **{key: manifest_files[path][key] for key in ("sha256", "size", "mode")}}
+                  for path in sorted(manifest_files)],
+        "symlinks": [],
+        "exclusion": {"path": baseline.EXCLUDED + "/",
+                       "files": reference["excluded_node_modules_files"],
+                       "symlinks": reference["excluded_node_modules_symlinks"]},
+    }
+    if release_state.inventory_digest_json(inventory) != reference["inventory_sha256"]:
+        raise BackupError("Inventario del manifest diverso dal riferimento current-release.")
 
 
 def extract_verified_archive(backup_fd, verification, staging_fd, destination_name, display_path):
@@ -1038,6 +1123,10 @@ def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, 
         assert_directory_still_named(private["root_fd"], "backups", private["backups_fd"], "backups")
         assert_private_root_still_named(private)
         assert_directory_still_named(private["root_fd"], "staging", private["staging_fd"], "staging")
+        try:
+            release_state.unresolved_operation(release_state.read_journal_at(private["state_fd"]))
+        except release_state.ReleaseStateError as exc:
+            raise BackupError(f"Restore-test bloccato da operazione incompleta: {exc}") from exc
         backup_fd = open_directory_at(private["backups_fd"], backup_id, "backup")
         verification = verify_backup_directory(None, backup_id, baseline_sha256, manifest_sha256,
                                                directory_fd=backup_fd)
