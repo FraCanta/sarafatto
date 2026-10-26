@@ -548,7 +548,7 @@ def bootstrap_current_release(*, private_root=PRIVATE_ROOT, expected_root=PRIVAT
             "inventory_sha256": second_digest,
             "inventory": second,
             "reference_files": [{"path": path, **expected[path]} for path in sorted(expected)],
-            "backup_pre_deploy": None,
+            "pre_deploy_backup": None,
             "candidate_release": None,
             "active_operation": None,
             "last_successful_operation": {"operation_id": "baseline-bootstrap-" + commit_sha[:12],

@@ -116,6 +116,8 @@ class ReleaseStateTests(unittest.TestCase):
         state = release_state.validate_state_document(json.loads(original))
         self.assertEqual(state["initial_baseline"]["commit_sha"], SHA)
         self.assertEqual(state["release"]["commit_sha"], SHA)
+        self.assertIsNone(state["pre_deploy_backup"])
+        self.assertNotIn("backup_pre_deploy", state)
         self.assertEqual(len(state["reference_files"]), len(self.files))
         with self.assertRaises(release_state.ReleaseStateError):
             self.bootstrap()
