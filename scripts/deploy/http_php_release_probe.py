@@ -201,8 +201,10 @@ def _prepare_run(staging_fd, staging_path):
         os.close(run_fd)
 
 
-def _verify_fixture(run_id, run_fd, releases_fd):
-    run_path = STAGING_ROOT / run_id
+def _verify_fixture(run_id, run_path, run_fd, releases_fd):
+    run_path = pathlib.Path(run_path)
+    if not run_path.is_absolute() or run_path.name != run_id:
+        raise ProbeError("Percorso assoluto della fixture non coerente con l'ID run.")
     docroot_fd = _open_dir_at(run_fd, "docroot")
     private_fd = _open_dir_at(run_fd, "private")
     try:
@@ -276,7 +278,7 @@ def _open_run(run_id):
             raise ProbeError("Directory run con owner o permessi inattesi.")
         releases_fd = _open_dir_at(run_fd, "releases")
         try:
-            _verify_fixture(run_id, run_fd, releases_fd)
+            _verify_fixture(run_id, STAGING_ROOT / run_id, run_fd, releases_fd)
             return staging_fd, run_fd, releases_fd
         except Exception:
             os.close(releases_fd)

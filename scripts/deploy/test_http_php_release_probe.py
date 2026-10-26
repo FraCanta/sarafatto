@@ -78,10 +78,29 @@ class HttpPhpReleaseProbeTests(unittest.TestCase):
             run_fd = os.open(run, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             releases_fd = os.open(run / "releases", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                probe._verify_fixture(result["run_id"], run_fd, releases_fd)
+                htaccess = run / "docroot" / ".htaccess"
+                original_auth = htaccess.read_bytes()
+                probe._verify_fixture(result["run_id"], run, run_fd, releases_fd)
+
+                htaccess.unlink()
+                with self.assertRaises(probe.ProbeError, msg=".htaccess assente deve bloccare"):
+                    probe._verify_fixture(result["run_id"], run, run_fd, releases_fd)
+                htaccess.write_bytes(original_auth)
+
+                for altered in (
+                    original_auth.replace(b"Require valid-user", b"Require all granted"),
+                    original_auth.replace(b"AuthType Basic", b"AuthType None"),
+                    original_auth + b"# altered\n",
+                ):
+                    with self.subTest(altered=altered):
+                        htaccess.write_bytes(altered)
+                        with self.assertRaises(probe.ProbeError):
+                            probe._verify_fixture(result["run_id"], run, run_fd, releases_fd)
+                htaccess.write_bytes(original_auth)
+
                 (run / "docroot" / "unreviewed.txt").write_text("extra", encoding="utf-8")
                 with self.assertRaises(probe.ProbeError):
-                    probe._verify_fixture(result["run_id"], run_fd, releases_fd)
+                    probe._verify_fixture(result["run_id"], run, run_fd, releases_fd)
             finally:
                 os.close(releases_fd)
                 os.close(run_fd)
