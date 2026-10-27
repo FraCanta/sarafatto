@@ -757,9 +757,9 @@ def validate_fresh_release_inventories(document, inventory_texts):
     return second
 
 
-def persist_verified_application_release(candidate, expected_previous_state_sha256, *,
-                                         private_root=PRIVATE_ROOT, expected_root=PRIVATE_ROOT,
-                                         baseline_sha256=None, inventory_reader=None):
+def persist_verified_application_release_state(candidate, expected_previous_state_sha256, *,
+                                               private_root=PRIVATE_ROOT, expected_root=PRIVATE_ROOT,
+                                               baseline_sha256=None, inventory_reader=None):
     """Promuove atomicamente current-release nell'area privata dopo terminale e doppio inventario.
 
     Non scrive il filesystem pubblico. Richiede che il writer abbia già completato
@@ -881,6 +881,10 @@ def persist_verified_application_release(candidate, expected_previous_state_sha2
         if state_fd is not None:
             os.close(state_fd)
         os.close(root_fd)
+
+
+# Alias compatibile con il nome usato durante lo sviluppo iniziale delle primitive.
+persist_verified_application_release = persist_verified_application_release_state
 
 
 def read_journal_at(state_fd, *, allow_fixture_committed=False):
