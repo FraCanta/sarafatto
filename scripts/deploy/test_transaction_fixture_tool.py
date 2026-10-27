@@ -694,7 +694,7 @@ class TransactionFixtureTests(unittest.TestCase):
         state_fd = os.open(self.workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         locks_fd = os.open(self.workspace.locks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            with self.assertRaisesRegex(release_state.ReleaseStateError, "futuro verificatore"):
+            with self.assertRaisesRegex(release_state.ReleaseStateError, "verificatore di deploy"):
                 release_state.append_operation_event(state_fd, locks_fd, "forged", "committed", {})
         finally:
             os.close(state_fd)
