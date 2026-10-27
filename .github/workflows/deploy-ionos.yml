@@ -64,6 +64,7 @@ jobs:
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_backup_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_release_state_tool.py
+          SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_application_release_state.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_transaction_fixture_tool.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_publisher.py

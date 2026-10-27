@@ -276,9 +276,10 @@ def inspect_production_state(authorized_sha):
 
         journal = release_state_tool.read_journal_at(state_fd)
         try:
-            release_state_tool.unresolved_operation(journal)
             if current_state is not None:
-                release_state_tool.validate_component_migration_journal(current_state, journal)
+                release_state_tool.validate_current_state_journal(current_state, journal)
+            else:
+                release_state_tool.unresolved_operation(journal)
         except release_state_tool.ReleaseStateError as exc:
             raise ProductionAdapterError(f"Journal con operazione irrisolta: {exc}") from exc
         if current_state is not None:
