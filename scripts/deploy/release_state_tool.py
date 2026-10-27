@@ -827,7 +827,9 @@ def persist_verified_application_release_state(candidate, expected_previous_stat
                 or (old_info.st_dev, old_info.st_ino) != (named_info.st_dev, named_info.st_ino)):
             raise ReleaseStateError("current-release sostituito o non regolare prima della promozione.")
         current_raw = _read_at(state_fd, STATE_NAME, "Stato precedente", MAX_STATE_BYTES)
-        if hashlib.sha256(current_raw).hexdigest() != current["state_sha256"]:
+        current_disk = validate_state_document(
+            _read_json(current_raw, "current-release precedente"), expected_baseline)
+        if current_disk != current or current_disk["state_sha256"] != expected_previous_state_sha256:
             raise ReleaseStateError("Stato precedente cambiato durante la promozione.")
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                           0o600, dir_fd=state_fd)

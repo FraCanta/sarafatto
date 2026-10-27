@@ -359,6 +359,33 @@ class ApplicationReleaseStateTests(unittest.TestCase):
                               locks_dir / "site-operation.lock"):
                 file_path.chmod(0o600)
             reader = lambda _sha: inventory_text
+            with self.assertRaisesRegex(state_tool.ReleaseStateError, "è cambiato"):
+                state_tool.persist_verified_application_release_state(
+                    b, "0" * 64, private_root=private, expected_root=private,
+                    baseline_sha256=baseline_sha, inventory_reader=reader)
+            state_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                self.assertEqual(state_tool.load_current_state(state_fd, baseline_sha)["state_sha256"],
+                                 a["state_sha256"])
+            finally:
+                os.close(state_fd)
+            changed_parent = copy.deepcopy(a)
+            changed_parent["timestamp_utc"] = "2026-10-27T11:00:00Z"
+            changed_parent.pop("state_sha256")
+            changed_parent["state_sha256"] = state_tool.digest_json(changed_parent)
+            state_tool.validate_state_document(changed_parent, baseline_sha)
+            state_path.write_bytes(state_tool.json_bytes(changed_parent))
+            with self.assertRaisesRegex(state_tool.ReleaseStateError, "è cambiato"):
+                state_tool.persist_verified_application_release_state(
+                    b, a["state_sha256"], private_root=private, expected_root=private,
+                    baseline_sha256=baseline_sha, inventory_reader=reader)
+            state_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                self.assertEqual(state_tool.load_current_state(state_fd, baseline_sha)["state_sha256"],
+                                 changed_parent["state_sha256"])
+            finally:
+                os.close(state_fd)
+            state_path.write_bytes(state_tool.json_bytes(a))
             result = state_tool.persist_verified_application_release_state(
                 b, a["state_sha256"], private_root=private, expected_root=private,
                 baseline_sha256=baseline_sha, inventory_reader=reader)
