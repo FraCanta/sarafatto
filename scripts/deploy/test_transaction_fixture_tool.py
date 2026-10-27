@@ -253,6 +253,39 @@ class TransactionFixtureTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaisesRegex(tx.TransactionError, "allowlist"):
                 tx._safe_relative(path)
 
+    def test_01i_metadata_privati_separati_dall_allowlist_pubblica(self):
+        # Il preflight di setUp ha già letto baseline e current-release dal descriptor state privato.
+        for path in ("baseline.json", release_state.STATE_NAME):
+            self.assertEqual(tx._safe_private_state_relative(path), path)
+            with self.assertRaises(tx.TransactionError):
+                tx._safe_relative(path)
+        for path in ("../baseline.json", str(self.workspace.state_dir / "baseline.json"),
+                     "state/baseline.json", "other.json"):
+            with self.subTest(path=path), self.assertRaises(tx.TransactionError):
+                tx._safe_private_state_relative(path)
+        public_fd = os.open(self.workspace.public_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with self.assertRaises(tx.TransactionError):
+                tx._write_new_at(public_fd, "baseline.json", b"must not be public")
+        finally:
+            os.close(public_fd)
+
+    def test_01j_metadata_privati_rifiutano_symlink_e_hardlink(self):
+        baseline_path = self.workspace.state_dir / "baseline.json"
+        original = baseline_path.read_bytes()
+        copy = self.root / "baseline-copy.json"
+        copy.write_bytes(original)
+        baseline_path.unlink()
+        baseline_path.symlink_to(copy)
+        with self.assertRaisesRegex(tx.TransactionError, "File assente o non regolare"):
+            tx._current_state(self.workspace)
+        baseline_path.unlink()
+        baseline_path.write_bytes(original)
+        copy.unlink()
+        os.link(baseline_path, copy)
+        with self.assertRaisesRegex(tx.TransactionError, "hard link"):
+            tx._current_state(self.workspace)
+
     def test_01h_collisioni_file_directory_mu_plugins_rifiutate(self):
         directory = self.workspace.public_root / "mu-plugins"
         saved = self.workspace.public_root / "mu-plugins-saved"

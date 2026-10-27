@@ -74,6 +74,13 @@ def _safe_relative(path):
     return path
 
 
+def _safe_private_state_relative(path):
+    """Consente solo i due documenti di stato, ancorati al descriptor privato."""
+    if path not in ("baseline.json", release_state.STATE_NAME):
+        raise TransactionError(f"Percorso metadata privato non consentito: {path!r}.")
+    return path
+
+
 def _safe_directory(relative):
     """Valida i soli contenitori necessari per raggiungere file gestiti."""
     return (
@@ -217,8 +224,8 @@ def _open_dir(parent_fd, name, create=False):
     return fd
 
 
-def _open_parent(root_fd, relative, create=False):
-    parts = _safe_relative(relative).split("/")
+def _open_parent(root_fd, relative, create=False, validator=_safe_relative):
+    parts = validator(relative).split("/")
     current = os.dup(root_fd)
     try:
         for part in parts[:-1]:
@@ -231,8 +238,8 @@ def _open_parent(root_fd, relative, create=False):
         raise
 
 
-def _read_at(root_fd, relative, limit=MAX_JSON):
-    parent_fd, name = _open_parent(root_fd, relative)
+def _read_at(root_fd, relative, limit=MAX_JSON, validator=_safe_relative):
+    parent_fd, name = _open_parent(root_fd, relative, validator=validator)
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
     except OSError as exc:
@@ -547,8 +554,12 @@ def _write_private_file(directory, name, data, mode=0o600):
 def _current_state(workspace):
     state_fd = os.open(workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        baseline_raw, _ = _read_at(state_fd, "baseline.json", MAX_JSON)
-        state_raw, _ = _read_at(state_fd, release_state.STATE_NAME, MAX_JSON)
+        baseline_raw, _ = _read_at(
+            state_fd, "baseline.json", MAX_JSON, validator=_safe_private_state_relative
+        )
+        state_raw, _ = _read_at(
+            state_fd, release_state.STATE_NAME, MAX_JSON, validator=_safe_private_state_relative
+        )
     finally:
         os.close(state_fd)
     try:
