@@ -387,4 +387,53 @@ L'endpoint autenticato riporta SAPI/versione PHP, accessibilità/acquisizione de
 
 Un marker presente, anche invalido o non leggibile, è trattato conservativamente come finestra armata. In caso di interruzione il sito può continuare a rispondere 503 finché un operatore non verifica lo stato e rimuove il marker tramite una procedura di recovery autorizzata; non cancellarlo alla cieca. Se manca il Secret, l'endpoint non è raggiungibile, PHP non può leggere il lock o la prova è stantia, `assert-ready` fallisce e il publisher deve restare bloccato. Anche con esito positivo non esiste ancora un publisher reale: questo strumento non arma finestre operative e non scrive nel perimetro pubblico.
 
-Prima di considerare la barriera operativa occorre verificare sul dominio la stessa SAPI/pool PHP, permessi effettivi, `open_basedir`, cache proxy/page cache, OPcache e realpath cache. In particolare una cache che risponde senza eseguire WordPress può aggirare il MU-plugin; le richieste di file statici non sono bloccate. Verificare la coerenza del codice eseguito con OPcache e il drain di richieste già attive. L'header e il 503 vanno provati solo nel banco HTTP isolato descritto sopra. Restano inoltre obbligatori pinning WordPress della release per richiesta, fault/recovery, backup fresco verificato, journal, health check e rollback. La CI offline non dimostra nessuno di questi comportamenti IONOS.
+Prima di considerare la barriera operativa occorre verificare sul dominio la stessa SAPI/pool PHP, permessi effettivi, `open_basedir`, cache proxy/page cache, OPcache e realpath cache. Una cache che risponde senza eseguire WordPress può aggirare il MU-plugin; le richieste di file statici non sono bloccate. Una sostituzione atomica del solo file non richiede il drain per evitare sorgenti parziali: le richieste che hanno già aperto il vecchio inode terminano sul vecchio contenuto, quelle successive aprono il file nuovo. La cache realpath conserva la risoluzione del percorso, non una copia parziale del file. OPcache è diverso: worker diversi possono continuare temporaneamente a usare opcode vecchi o nuovi. Poiché la configurazione della barriera resta disabilitata durante questa migrazione e il codice Polylang è identico nelle due versioni, tale sovrapposizione non equivale a una release composta da file incompatibili; impedisce però di dichiarare la barriera attiva uniformemente. Prima di armarla serve un metodo IONOS verificabile per invalidare/riavviare il pool o attestare tutti i worker. La CI offline non dimostra questi comportamenti IONOS.
+
+## Prima installazione pubblica della barriera MU-plugin — bloccata
+
+La migrazione riguarda solo `mu-plugins/sarafatto-polylang-front-page-url.php`. Valori attesi fissati in `scripts/deploy/mu_plugin_migration_tool.py`: commit sorgente `50bbe01af38814f41d5a67bb37fef45b181f5fd1`, release pubblica precedente `911d6a72ac0f624dc85b43d53b1c299968d683f6`, inventario `d0aa002e885f252ddf23226eb59c30857dce4a1c24a03fc50da66aaadb1340cf`, baseline `07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd`, SHA vecchio MU-plugin `2ffd84b3f170ec2e0eae1cab5935391bb8e9d5311e3c55025719ab60d1417252` e SHA nuovo `1b4d430566abf2b01e3e22512212e2f03f623450e207366e63f02d97e85d4c7f`. Lo strumento non installa file: `PUBLIC_WRITE_ENABLED` è falso e `install` rifiuta sempre. Non esistono opzioni `force` o percorsi pubblici configurabili.
+
+### Comandi read-only
+
+Dopo aver reso disponibile il commit sorgente nel clone locale, verificare il blob autorizzato e il file candidato:
+
+~~~bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py verify-local
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py status
+~~~
+
+`verify-local` confronta il blob MU-plugin del commit autorizzato con il file locale; il `HEAD` degli strumenti può essere successivo. `status` mostra i blocchi e la conferma esatta richiesta. Sul server, solo dopo autorizzazione alle verifiche read-only, controllare commit, baseline, registro e inventario fresco con lo strumento esistente:
+
+~~~bash
+cd /home/www/sarafatto-repo
+GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/production_adapter.py inspect \
+  --authorized-sha '50bbe01af38814f41d5a67bb37fef45b181f5fd1'
+~~~
+
+Questi controlli non scrivono sul sito. `install --approve-operation 'INSTALL-MU-BARRIER …'` è deliberatamente bloccato e non va eseguito: neppure la conferma esatta abilita la scrittura.
+
+### Verifica e attestazione separata del backup dedicato
+
+La CLI ora può verificare il backup nominato in sola lettura e, solo dopo il confronto con un digest manifesto conservato indipendentemente, creare una attestazione nuova e no-clobber in `state/mu-plugin-backup-attestation.json`. Il comando non accetta percorsi e non modifica il backup. Il digest deve provenire dal report di verifica originale o da una fonte approvata distinta; non usare un digest appena letto dal medesimo backup come se fosse una prova indipendente:
+
+~~~bash
+cd /home/www/sarafatto-repo
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py \
+  attest-backup --manifest-sha256 '<SHA-256 conservato indipendentemente>'
+~~~
+
+Il comando acquisisce `site-operation.lock`, verifica baseline, manifest, marker `COMPLETE`, archivio TAR e contenuti dei membri tramite `backup_tool.py`, richiede che il file MU-plugin nel backup coincida con la baseline e scrive l'attestazione solo nell'area privata. Se il file di attestazione esiste già, non lo sovrascrive. L'output JSON include il digest dell'attestazione da conservare separatamente. Questa verifica non abilita `install`.
+
+### Blocchi specifici della migrazione a file singolo
+
+1. **Backup dedicato:** `/home/www/sarafatto-deploy/backups/mu-plugin-pre-barrier-20261026T201411Z` non rispetta il formato ID accettato da `backup_tool.py` (`YYYYMMDDTHHMMSSZ-<12 hex>`) e non è disponibile qui il digest manifesto indipendente. Il tool può verificare una directory già aperta tramite descriptor, ma occorrono l'ID registrato nel manifest, il digest esterno approvato e un test locale del percorso di verifica, senza rinominare o riscrivere il backup. In alternativa serve un backup fresco nel formato supportato; il backup esistente va conservato.
+2. **Journal e stato corrente:** `release_state_tool.py` convalida solo lo stato iniziale. Serve una transizione dedicata che registri il vecchio e nuovo hash del MU-plugin, il riferimento alla release base, il backup verificato e l'inventario pubblico finale. Non deve etichettare il commit `50bbe01…` come release interamente pubblicata: tema e plugin custom restano alla release `911d6a…`. Fino a tale transizione, `current-release.json` non va modificato.
+3. **OPcache e operatività della barriera:** un singolo endpoint HTTP non può attestare ogni worker. Dopo la sostituzione si può mantenere `request-barrier.json` disabilitato e il sito continua a ricevere richieste: vecchio e nuovo codice completo sono compatibili per il comportamento Polylang. Prima di abilitare la barriera, IONOS deve fornire un'azione verificabile di invalidazione/riavvio del pool PHP, oppure un meccanismo di attestazione che copra tutti i worker e le richieste instradate. Se nessuno dei due esiste, la barriera resta non attivabile e non si può iniziare il deploy multi-componente.
+4. **Verifica applicativa:** eseguire lint PHP compatibile e controlli HTTP ripetuti di WordPress/Polylang, verificando hash live e versione del codice servita. La procedura di status attuale non effettua tali controlli.
+
+### Sequenza prevista, senza drain per questa sola sostituzione
+
+Quando i blocchi 1, 2 e 4 saranno chiusi con prove, l'operazione limitata dovrà: acquisire `site-operation.lock` esclusivo; verificare nuovamente baseline, current-release, inventario fresco e hash vecchio; verificare in sola lettura il backup dedicato e il suo digest esterno; registrare nel journal una transazione `prepared` specifica per il solo MU-plugin; creare il candidato nella stessa directory/filesystem conservando owner, group e mode; verificare byte e sintassi; sostituire il singolo pathname con rename atomico senza intervallo di file assente; rileggere e verificare l'hash live; completare il journal e aggiornare lo stato con la transizione dedicata solo dopo i controlli. Se il processo si interrompe, il journal deve lasciare `recovery_required`; la ripresa confronta il file live con gli hash vecchio/nuovo e non inventa uno stato. L'eventuale rollback è lo stesso swap atomico inverso dal backup verificato. Nessuna di queste scritture è implementata dal tool corrente.
+
+Non occorre fermare richieste già avviate per proteggere l'integrità del singolo file. Occorre invece provare che il vecchio e il nuovo bytecode siano entrambi compatibili durante la finestra (il codice Polylang invariato e barriera disabilitata soddisfano la compatibilità osservabile dal diff) e non dichiarare la barriera attiva finché OPcache non sia uniformato. Questo non dimostra la sicurezza di una successiva pubblicazione di tema, plugin e MU-plugin insieme.
