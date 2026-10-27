@@ -76,7 +76,7 @@ class MuPluginMigrationTests(unittest.TestCase):
     def test_blocchi_distinguono_atomicita_file_da_barriera_uniforme_e_stato(self):
         blockers = " ".join(migration.readiness_report()["blockers"])
         self.assertNotIn("dreni tutte le richieste", blockers)
-        for required in ("digest manifest", "current-release", "opcode", "worker", "Polylang"):
+        for required in ("digest indipendente", "current-release", "opcode", "worker", "Polylang"):
             with self.subTest(required=required):
                 self.assertIn(required, blockers)
 
@@ -108,12 +108,20 @@ class MuPluginMigrationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), new_bytes)
 
     @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
-    def test_attestazione_verifica_backup_dedicato_senza_sovrascrittura(self):
+    def test_backup_ufficiale_verifica_e_attesta_senza_sovrascrittura(self):
         fixture, created, old_sha = self.make_dedicated_backup_fixture()
         with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
-                mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
-            result = migration.attest_dedicated_backup(
-                created["manifest_sha256"], private_root=fixture.private,
+                mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \
+                mock.patch.object(migration, "OFFICIAL_BACKUP_MANIFEST_SHA256", created["manifest_sha256"]), \
+                mock.patch.object(migration, "OFFICIAL_BACKUP_ID", created["backup_id"]), \
+                mock.patch.object(migration, "BACKUP_DIRECTORY_NAME", created["backup_id"]):
+            verified = migration.verify_official_backup(
+                private_root=fixture.private, expected_root=fixture.private)
+            self.assertEqual(verified["backup_id"], created["backup_id"])
+            self.assertIn("excludes database/uploads/third-party-plugins", verified["scope"])
+            self.assertFalse((fixture.state / migration.BACKUP_ATTESTATION_NAME).exists())
+            result = migration.attest_official_backup(
+                private_root=fixture.private,
                 expected_root=fixture.private)
             self.assertEqual(result["verification"],
                              "backup-tool-independent-digest-and-payload-verified")
@@ -121,8 +129,8 @@ class MuPluginMigrationTests(unittest.TestCase):
             self.assertTrue(proof_path.is_file())
             original = proof_path.read_bytes()
             with self.assertRaisesRegex(migration.MigrationBlocked, "già presente"):
-                migration.attest_dedicated_backup(
-                    created["manifest_sha256"], private_root=fixture.private,
+                migration.attest_official_backup(
+                    private_root=fixture.private,
                     expected_root=fixture.private)
             self.assertEqual(proof_path.read_bytes(), original)
 
@@ -130,10 +138,12 @@ class MuPluginMigrationTests(unittest.TestCase):
     def test_attestazione_rifiuta_digest_esterno_errato_senza_scrivere(self):
         fixture, created, old_sha = self.make_dedicated_backup_fixture()
         with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
-                mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
+                mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \
+                mock.patch.object(migration, "OFFICIAL_BACKUP_MANIFEST_SHA256", "0" * 64), \
+                mock.patch.object(migration, "OFFICIAL_BACKUP_ID", created["backup_id"]), \
+                mock.patch.object(migration, "BACKUP_DIRECTORY_NAME", created["backup_id"]):
             with self.assertRaisesRegex(migration.MigrationBlocked, "manifest|SHA-256"):
-                migration.attest_dedicated_backup(
-                    "0" * 64 if created["manifest_sha256"] != "0" * 64 else "f" * 64,
+                migration.attest_official_backup(
                     private_root=fixture.private, expected_root=fixture.private)
         self.assertFalse((fixture.state / migration.BACKUP_ATTESTATION_NAME).exists())
 
@@ -150,10 +160,13 @@ class MuPluginMigrationTests(unittest.TestCase):
                     (fixture.backups / migration.BACKUP_DIRECTORY_NAME).rename(
                         fixture.backups / "held-away-from-fixed-path")
                 with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
-                        mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
+                        mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \
+                        mock.patch.object(migration, "OFFICIAL_BACKUP_MANIFEST_SHA256", created["manifest_sha256"]), \
+                        mock.patch.object(migration, "OFFICIAL_BACKUP_ID", created["backup_id"]), \
+                        mock.patch.object(migration, "BACKUP_DIRECTORY_NAME", created["backup_id"]):
                     with self.assertRaises(migration.MigrationBlocked):
-                        migration.attest_dedicated_backup(
-                            created["manifest_sha256"], private_root=fixture.private,
+                        migration.attest_official_backup(
+                            private_root=fixture.private,
                             expected_root=fixture.private)
                 self.assertFalse((fixture.state / migration.BACKUP_ATTESTATION_NAME).exists())
 

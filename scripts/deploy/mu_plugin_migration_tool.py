@@ -29,14 +29,17 @@ CURRENT_PUBLIC_INVENTORY_SHA256 = "d0aa002e885f252ddf23226eb59c30857dce4a1c24a03
 BASELINE_SHA256 = "07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd"
 OLD_MU_PLUGIN_SHA256 = "2ffd84b3f170ec2e0eae1cab5935391bb8e9d5311e3c55025719ab60d1417252"
 NEW_MU_PLUGIN_SHA256 = "1b4d430566abf2b01e3e22512212e2f03f623450e207366e63f02d97e85d4c7f"
-DEDICATED_BACKUP = "/home/www/sarafatto-deploy/backups/mu-plugin-pre-barrier-20261026T201411Z"
+OFFICIAL_BACKUP_ID = "20261024T181841Z-bdcc8d63457a"
+OFFICIAL_BACKUP_MANIFEST_SHA256 = "c502c1fe239515ff3324a4c55e77443c9a6ab7b8e6c77d4e3472a3d84ab369ae"
+OFFICIAL_BACKUP_PATH = f"/home/www/sarafatto-deploy/backups/{OFFICIAL_BACKUP_ID}"
+LEGACY_DEDICATED_BACKUP = "/home/www/sarafatto-deploy/backups/mu-plugin-pre-barrier-20261026T201411Z"
 PUBLIC_WRITE_ENABLED = False
 MAX_SOURCE_BYTES = 1024 * 1024
-BACKUP_DIRECTORY_NAME = pathlib.PurePosixPath(DEDICATED_BACKUP).name
+BACKUP_DIRECTORY_NAME = OFFICIAL_BACKUP_ID
 BACKUP_ATTESTATION_NAME = "mu-plugin-backup-attestation.json"
 
 BLOCKERS = (
-    "L'attestazione del backup è implementata ma richiede il digest manifest conservato fuori banda, non ancora fornito; senza tale valore il backup dedicato resta non verificato.",
+    "Il backup ufficiale è configurato con digest indipendente noto; l'attestazione effettiva su IONOS resta da eseguire in sola lettura prima della migrazione.",
     "current-release.json accetta solo il bootstrap iniziale: manca una transizione journal/state specifica che registri il delta del solo MU-plugin senza dichiarare pubblicata l'intera release.",
     "Dopo l'installazione, l'adozione uniforme del nuovo opcode da parte dei worker PHP web non è dimostrabile con una singola richiesta HTTP; la barriera non può essere armata finché IONOS non fornisce un metodo verificabile di invalidazione/riavvio o attestazione completa dei worker.",
     "Manca una verifica post-migrazione che controlli hash live, risposta WordPress/Polylang e adozione del nuovo opcode; la cache realpath non implica sorgente parziale, ma OPcache può continuare a servire il bytecode precedente.",
@@ -139,16 +142,19 @@ def readiness_report():
         "baseline_sha256": BASELINE_SHA256,
         "old_mu_plugin_sha256": OLD_MU_PLUGIN_SHA256,
         "new_mu_plugin_sha256": NEW_MU_PLUGIN_SHA256,
-        "dedicated_backup": DEDICATED_BACKUP,
+        "official_backup": OFFICIAL_BACKUP_PATH,
+        "official_backup_manifest_sha256": OFFICIAL_BACKUP_MANIFEST_SHA256,
+        "preserved_legacy_copy": LEGACY_DEDICATED_BACKUP,
         "approval_challenge": operation_approval(),
         "blockers": list(BLOCKERS),
     }
 
 
-def _fixed_backup_attestation(private_root, expected_root, manifest_sha256, *, private=None, lock_held=False):
-    """Verifica read-only il backup dedicato contro un digest approvato fuori banda."""
+def _fixed_backup_attestation(private_root, expected_root, *, private=None, lock_held=False):
+    """Verifica read-only il backup applicativo ufficiale con digest fissato fuori banda."""
+    manifest_sha256 = OFFICIAL_BACKUP_MANIFEST_SHA256
     if not re_full_sha256(manifest_sha256):
-        raise MigrationBlocked("Serve lo SHA-256 del manifest backup verificato e approvato indipendentemente.")
+        raise MigrationBlocked("Digest manifesto approvato non valido.")
     owned_private = private is None
     private = private or backup_tool.open_private_directories(private_root, expected_root)
     backup_fd = None
@@ -169,6 +175,8 @@ def _fixed_backup_attestation(private_root, expected_root, manifest_sha256, *, p
             manifest = backup_tool.read_json_no_duplicates(raw, "manifest backup dedicato")
             backup_id = manifest.get("backup_id")
             backup_tool.validate_id(backup_id)
+            if backup_id != OFFICIAL_BACKUP_ID:
+                raise MigrationBlocked("ID del manifest diverso dal backup applicativo ufficiale autorizzato.")
             verified = backup_tool.verify_backup_directory(
                 None, backup_id, BASELINE_SHA256, manifest_sha256,
                 require_complete=True, directory_fd=backup_fd)
@@ -181,13 +189,14 @@ def _fixed_backup_attestation(private_root, expected_root, manifest_sha256, *, p
                 raise MigrationBlocked("Il backup non contiene il MU-plugin originale atteso dalla baseline.")
             return {
                 "schema_version": 1,
-                "backup_path": DEDICATED_BACKUP,
+                "backup_path": OFFICIAL_BACKUP_PATH,
                 "backup_id": backup_id,
                 "baseline_sha256": baseline_digest,
                 "manifest_sha256": verified["manifest_sha256"],
                 "target": TARGET_RELATIVE,
                 "original": {key: entry[key] for key in ("sha256", "size", "mode")},
                 "files_verified": len(verified["files"]),
+                "scope": "managed-theme-plugin-and-authorized-mu-plugin-only; excludes database/uploads/third-party-plugins",
                 "verified_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                 "verification": "backup-tool-independent-digest-and-payload-verified",
             }
@@ -209,14 +218,30 @@ def re_full_sha256(value):
     return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
-def attest_dedicated_backup(manifest_sha256, *, private_root=pathlib.Path("/home/www/sarafatto-deploy"),
-                            expected_root=pathlib.Path("/home/www/sarafatto-deploy")):
-    """Verifica e registra una attestazione privata no-clobber; non tocca il backup."""
+def verify_official_backup(*, private_root=pathlib.Path("/home/www/sarafatto-deploy"),
+                           expected_root=pathlib.Path("/home/www/sarafatto-deploy")):
+    """Verifica read-only il backup ufficiale fissato, senza creare attestazioni."""
     private = backup_tool.open_private_directories(private_root, expected_root)
     lock_fd = None
     try:
         lock_fd = baseline_tool.acquire_baseline_lock(None, private["locks_fd"])
-        proof = _fixed_backup_attestation(private_root, expected_root, manifest_sha256,
+        return _fixed_backup_attestation(private_root, expected_root, private=private, lock_held=True)
+    finally:
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        backup_tool.close_private_directories(private)
+
+
+def attest_official_backup(*, private_root=pathlib.Path("/home/www/sarafatto-deploy"),
+                           expected_root=pathlib.Path("/home/www/sarafatto-deploy")):
+    """Verifica il backup immutabile ufficiale e registra attestazione privata no-clobber."""
+    private = backup_tool.open_private_directories(private_root, expected_root)
+    lock_fd = None
+    try:
+        lock_fd = baseline_tool.acquire_baseline_lock(None, private["locks_fd"])
+        proof = _fixed_backup_attestation(private_root, expected_root,
                                           private=private, lock_held=True)
         name = BACKUP_ATTESTATION_NAME
         payload = (json.dumps(proof, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -263,9 +288,8 @@ def parser():
     local = commands.add_parser("verify-local", help="verifica commit e SHA sorgente locale, sola lettura")
     local.add_argument("--repository", default=str(REPOSITORY_ROOT),
                        help="checkout locale da verificare; non è un percorso pubblico")
-    attest = commands.add_parser("attest-backup", help="verifica backup esistente e crea attestazione privata no-clobber")
-    attest.add_argument("--manifest-sha256", required=True,
-                        help="digest conservato indipendentemente alla creazione/verifica originale del backup")
+    commands.add_parser("attest-backup", help="verifica backup ufficiale fissato e crea attestazione privata no-clobber")
+    commands.add_parser("verify-backup", help="verifica read-only backup ufficiale fissato, senza creare attestazione")
     install = commands.add_parser("install", help="operazione pubblica disabilitata in questa versione")
     install.add_argument("--approve-operation", required=True,
                          help="conferma esatta stampata da status; non supera i blocchi tecnici")
@@ -284,14 +308,19 @@ def main(argv=None):
             print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
             return 0
         if args.command == "attest-backup":
-            result = attest_dedicated_backup(args.manifest_sha256)
+            result = attest_official_backup()
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+            return 0
+        if args.command == "verify-backup":
+            result = verify_official_backup()
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
             return 0
         validate_operation_approval(args.approve_operation)
         # Non aggiungere un ramo di scrittura finché ogni blocco non è stato
         # chiuso con prove server-side e una transizione di stato implementata.
         raise MigrationBlocked("Installazione pubblica disabilitata: prerequisiti IONOS non dimostrati.")
-    except (MigrationBlocked, OSError, ValueError, UnicodeError) as exc:
+    except (MigrationBlocked, backup_tool.BackupError, baseline_tool.BaselineError,
+            OSError, ValueError, UnicodeError) as exc:
         print(f"ERRORE: migrazione MU-plugin bloccata: {exc}", file=sys.stderr)
         return 2
 

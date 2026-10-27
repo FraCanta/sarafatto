@@ -413,27 +413,37 @@ GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 \
 
 Questi controlli non scrivono sul sito. `install --approve-operation 'INSTALL-MU-BARRIER …'` è deliberatamente bloccato e non va eseguito: neppure la conferma esatta abilita la scrittura.
 
-### Verifica e attestazione separata del backup dedicato
+### Verifica e attestazione separata del backup ufficiale
 
-La CLI ora può verificare il backup nominato in sola lettura e, solo dopo il confronto con un digest manifesto conservato indipendentemente, creare una attestazione nuova e no-clobber in `state/mu-plugin-backup-attestation.json`. Il comando non accetta percorsi e non modifica il backup. Il digest deve provenire dal report di verifica originale o da una fonte approvata distinta; non usare un digest appena letto dal medesimo backup come se fosse una prova indipendente:
+Il preflight usa il backup applicativo ufficiale `20261024T181841Z-bdcc8d63457a` con il digest manifesto indipendente noto `c502c1fe239515ff3324a4c55e77443c9a6ab7b8e6c77d4e3472a3d84ab369ae` e la baseline `07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd`. Non accetta percorsi o digest forniti al momento dell'esecuzione. Prima eseguire il comando read-only: verifica manifest, marker `COMPLETE`, archivio TAR, contenuti di tutti i membri e hash del MU-plugin senza creare attestazioni:
 
 ~~~bash
 cd /home/www/sarafatto-repo
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py \
-  attest-backup --manifest-sha256 '<SHA-256 conservato indipendentemente>'
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py verify-backup
 ~~~
 
-Il comando acquisisce `site-operation.lock`, verifica baseline, manifest, marker `COMPLETE`, archivio TAR e contenuti dei membri tramite `backup_tool.py`, richiede che il file MU-plugin nel backup coincida con la baseline e scrive l'attestazione solo nell'area privata. Se il file di attestazione esiste già, non lo sovrascrive. L'output JSON include il digest dell'attestazione da conservare separatamente. Questa verifica non abilita `install`.
+Il comando acquisisce `site-operation.lock` e riusa `backup_tool.py`. Controlla che il record del MU-plugin abbia lo SHA della baseline e include nel report lo scope dei componenti gestiti: non copre database, uploads o plugin di terze parti. Per conservare il risultato verificato in una attestazione separata nell'area privata, eseguire poi `PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/mu_plugin_migration_tool.py attest-backup`. Questa seconda operazione crea il file solo se assente e non sovrascrive il backup. Il backup dedicato manuale resta intatto e non viene usato come prova. L'attestazione non abilita `install`.
 
 ### Blocchi specifici della migrazione a file singolo
 
-1. **Backup dedicato:** `/home/www/sarafatto-deploy/backups/mu-plugin-pre-barrier-20261026T201411Z` non rispetta il formato ID accettato da `backup_tool.py` (`YYYYMMDDTHHMMSSZ-<12 hex>`) e non è disponibile qui il digest manifesto indipendente. Il tool può verificare una directory già aperta tramite descriptor, ma occorrono l'ID registrato nel manifest, il digest esterno approvato e un test locale del percorso di verifica, senza rinominare o riscrivere il backup. In alternativa serve un backup fresco nel formato supportato; il backup esistente va conservato.
+1. **Verifica server-side del backup:** il verificatore è vincolato all'ID ufficiale e al digest indipendente noto. La sua esecuzione read-only su IONOS resta necessaria per attestare che i byte presenti sul server corrispondano. Il backup dedicato manuale resta conservato, ma non è una prova sostitutiva.
 2. **Journal e stato corrente:** `release_state_tool.py` convalida solo lo stato iniziale. Serve una transizione dedicata che registri il vecchio e nuovo hash del MU-plugin, il riferimento alla release base, il backup verificato e l'inventario pubblico finale. Non deve etichettare il commit `50bbe01…` come release interamente pubblicata: tema e plugin custom restano alla release `911d6a…`. Fino a tale transizione, `current-release.json` non va modificato.
 3. **OPcache e operatività della barriera:** un singolo endpoint HTTP non può attestare ogni worker. Dopo la sostituzione si può mantenere `request-barrier.json` disabilitato e il sito continua a ricevere richieste: vecchio e nuovo codice completo sono compatibili per il comportamento Polylang. Prima di abilitare la barriera, IONOS deve fornire un'azione verificabile di invalidazione/riavvio del pool PHP, oppure un meccanismo di attestazione che copra tutti i worker e le richieste instradate. Se nessuno dei due esiste, la barriera resta non attivabile e non si può iniziare il deploy multi-componente.
 4. **Verifica applicativa:** eseguire lint PHP compatibile e controlli HTTP ripetuti di WordPress/Polylang, verificando hash live e versione del codice servita. La procedura di status attuale non effettua tali controlli.
 
 ### Sequenza prevista, senza drain per questa sola sostituzione
 
-Quando i blocchi 1, 2 e 4 saranno chiusi con prove, l'operazione limitata dovrà: acquisire `site-operation.lock` esclusivo; verificare nuovamente baseline, current-release, inventario fresco e hash vecchio; verificare in sola lettura il backup dedicato e il suo digest esterno; registrare nel journal una transazione `prepared` specifica per il solo MU-plugin; creare il candidato nella stessa directory/filesystem conservando owner, group e mode; verificare byte e sintassi; sostituire il singolo pathname con rename atomico senza intervallo di file assente; rileggere e verificare l'hash live; completare il journal e aggiornare lo stato con la transizione dedicata solo dopo i controlli. Se il processo si interrompe, il journal deve lasciare `recovery_required`; la ripresa confronta il file live con gli hash vecchio/nuovo e non inventa uno stato. L'eventuale rollback è lo stesso swap atomico inverso dal backup verificato. Nessuna di queste scritture è implementata dal tool corrente.
+Il ripristino futuro del solo MU-plugin dovrà usare `payload.tar.gz` del backup ufficiale già verificato. Per preparare e controllare una copia **solo privata**, dopo `verify-backup`:
+
+~~~bash
+umask 077
+archive=/home/www/sarafatto-deploy/backups/20261024T181841Z-bdcc8d63457a/payload.tar.gz
+candidate=$(mktemp /home/www/sarafatto-deploy/staging/mu-plugin-restore.XXXXXX)
+tar -xOzf "$archive" mu-plugins/sarafatto-polylang-front-page-url.php > "$candidate"
+sha256sum "$candidate"
+# Atteso: 2ffd84b3f170ec2e0eae1cab5935391bb8e9d5311e3c55025719ab60d1417252
+~~~
+
+Non estrarre il TAR nella webroot e non ripristinare gli altri membri. La copia candidata resta in staging privata; il writer che effettua lo swap atomico del solo pathname pubblico non è implementato né abilitato.
 
 Non occorre fermare richieste già avviate per proteggere l'integrità del singolo file. Occorre invece provare che il vecchio e il nuovo bytecode siano entrambi compatibili durante la finestra (il codice Polylang invariato e barriera disabilitata soddisfano la compatibilità osservabile dal diff) e non dichiarare la barriera attiva finché OPcache non sia uniformato. Questo non dimostra la sicurezza di una successiva pubblicazione di tema, plugin e MU-plugin insieme.
