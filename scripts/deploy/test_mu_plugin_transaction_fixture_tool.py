@@ -161,6 +161,8 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
         try:
             with self.assertRaises(tx.TransactionError):
                 tx._write_new_at(public_fd, "candidate.php", self.candidate, 0o644)
+            with self.assertRaises(tx.TransactionError):
+                tx._replace_at(public_fd, migration.state_tool.STATE_NAME, b"forbidden", 0o600, None)
         finally:
             os.close(public_fd)
 

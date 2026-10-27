@@ -57,7 +57,10 @@ def _read_target(workspace):
 def _state_bytes(workspace):
     state_fd = os.open(workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        raw, _ = tx._read_at(state_fd, state_tool.STATE_NAME, state_tool.MAX_STATE_BYTES)
+        raw, _ = tx._read_at(
+            state_fd, state_tool.STATE_NAME, state_tool.MAX_STATE_BYTES,
+            validator=tx._safe_private_state_relative,
+        )
         return raw
     finally:
         os.close(state_fd)
@@ -107,14 +110,16 @@ def _write_state(workspace, current, migration, *, lifecycle):
     state.pop("state_sha256", None)
     state["state_sha256"] = state_tool.digest_json(state)
     state_tool.validate_state_document(state, state["initial_baseline"]["sha256"])
-    root_fd = os.open(workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    state_fd = os.open(workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         before_raw = _state_bytes(workspace)
         before = {"sha256": hashlib.sha256(before_raw).hexdigest(), "size": len(before_raw), "mode": "600"}
-        tx._replace_at(root_fd, "private/state/" + state_tool.STATE_NAME,
-                       state_tool.json_bytes(state), 0o600, before)
+        tx._replace_at(
+            state_fd, state_tool.STATE_NAME, state_tool.json_bytes(state), 0o600, before,
+            validator=tx._safe_private_state_relative,
+        )
     finally:
-        os.close(root_fd)
+        os.close(state_fd)
     return state
 
 

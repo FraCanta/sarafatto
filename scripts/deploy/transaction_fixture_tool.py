@@ -282,8 +282,8 @@ def _write_new_at(root_fd, relative, data, mode=0o600, create_dirs=False):
         os.close(parent_fd)
 
 
-def _replace_at(root_fd, relative, data, mode, expected_before):
-    parent_fd, name = _open_parent(root_fd, relative, create=True)
+def _replace_at(root_fd, relative, data, mode, expected_before, validator=_safe_relative):
+    parent_fd, name = _open_parent(root_fd, relative, create=True, validator=validator)
     temp_name = ".sf-txn-" + uuid.uuid4().hex
     temp_fd = None
     try:

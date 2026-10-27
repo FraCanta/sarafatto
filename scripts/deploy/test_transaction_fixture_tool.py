@@ -267,6 +267,8 @@ class TransactionFixtureTests(unittest.TestCase):
         try:
             with self.assertRaises(tx.TransactionError):
                 tx._write_new_at(public_fd, "baseline.json", b"must not be public")
+            with self.assertRaises(tx.TransactionError):
+                tx._replace_at(public_fd, release_state.STATE_NAME, b"must not be public", 0o600, None)
         finally:
             os.close(public_fd)
 
