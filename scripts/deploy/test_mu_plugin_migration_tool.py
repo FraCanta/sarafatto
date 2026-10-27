@@ -19,6 +19,15 @@ import test_backup_tool as backup_fixture_module
 
 
 class MuPluginMigrationTests(unittest.TestCase):
+    def make_dedicated_backup_fixture(self):
+        fixture = backup_fixture_module.BackupToolTests("test_01_backup_valido_e_verificabile")
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        created = fixture.create()
+        os.rename(fixture.backups / created["backup_id"],
+                  fixture.backups / migration.BACKUP_DIRECTORY_NAME)
+        return fixture, created, __import__("hashlib").sha256(b"mu bytes").hexdigest()
+
     def mock_git_for_source(self, source):
         def fake_run(command, **_kwargs):
             output = b"b" * 40 + b"\n" if "rev-parse" in command else source
@@ -100,13 +109,7 @@ class MuPluginMigrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
     def test_attestazione_verifica_backup_dedicato_senza_sovrascrittura(self):
-        fixture = backup_fixture_module.BackupToolTests("test_01_backup_valido_e_verificabile")
-        fixture.setUp()
-        self.addCleanup(fixture.tearDown)
-        created = fixture.create()
-        os.rename(fixture.backups / created["backup_id"],
-                  fixture.backups / migration.BACKUP_DIRECTORY_NAME)
-        old_sha = __import__("hashlib").sha256(b"mu bytes").hexdigest()
+        fixture, created, old_sha = self.make_dedicated_backup_fixture()
         with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
                 mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
             result = migration.attest_dedicated_backup(
@@ -125,14 +128,34 @@ class MuPluginMigrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
     def test_attestazione_rifiuta_digest_esterno_errato_senza_scrivere(self):
-        fixture = backup_fixture_module.BackupToolTests("test_01_backup_valido_e_verificabile")
-        fixture.setUp()
-        self.addCleanup(fixture.tearDown)
-        with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha):
-            with self.assertRaisesRegex(migration.MigrationBlocked, "SHA-256 manifest"):
+        fixture, created, old_sha = self.make_dedicated_backup_fixture()
+        with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
+                mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
+            with self.assertRaisesRegex(migration.MigrationBlocked, "manifest|SHA-256"):
                 migration.attest_dedicated_backup(
-                    "0" * 64, private_root=fixture.private, expected_root=fixture.private)
+                    "0" * 64 if created["manifest_sha256"] != "0" * 64 else "f" * 64,
+                    private_root=fixture.private, expected_root=fixture.private)
         self.assertFalse((fixture.state / migration.BACKUP_ATTESTATION_NAME).exists())
+
+    @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
+    def test_attestazione_rifiuta_backup_mancante_o_archivio_alterato(self):
+        for alter_archive in (False, True):
+            with self.subTest(alter_archive=alter_archive):
+                fixture, created, old_sha = self.make_dedicated_backup_fixture()
+                if alter_archive:
+                    archive = (fixture.backups / migration.BACKUP_DIRECTORY_NAME /
+                               backup_fixture_module.backup_tool.BACKUP_ARCHIVE)
+                    archive.write_bytes(archive.read_bytes() + b"tamper")
+                else:
+                    (fixture.backups / migration.BACKUP_DIRECTORY_NAME).rename(
+                        fixture.backups / "held-away-from-fixed-path")
+                with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
+                        mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha):
+                    with self.assertRaises(migration.MigrationBlocked):
+                        migration.attest_dedicated_backup(
+                            created["manifest_sha256"], private_root=fixture.private,
+                            expected_root=fixture.private)
+                self.assertFalse((fixture.state / migration.BACKUP_ATTESTATION_NAME).exists())
 
     def test_sorgente_symlink_rifiutata(self):
         with tempfile.TemporaryDirectory(prefix="sf-mu-migration-", dir=pathlib.Path(__file__).parent) as temporary:
