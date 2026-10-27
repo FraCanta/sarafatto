@@ -458,6 +458,36 @@ def _target_path_parts(relative):
     return relative.split("/")
 
 
+def _target_directory_parts(relative):
+    """Ammette solo le due root directory dei componenti, mai i parent generici."""
+    allowed = {ALLOWED_COMPONENTS[0], ALLOWED_COMPONENTS[1]}
+    if not isinstance(relative, str) or relative not in allowed:
+        raise PublisherError(f"Directory target fuori allowlist: {relative!r}.")
+    return relative.split("/")
+
+
+def _open_target_component_dir(root_fd, relative):
+    """Apre la root esatta di tema/plugin; ogni segmento è no-follow e deve essere directory."""
+    parts = _target_directory_parts(relative)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            info = os.fstat(child)
+            if not stat.S_ISDIR(info.st_mode):
+                os.close(child)
+                raise PublisherError(f"Componente target non-directory: {relative}.")
+            os.close(fd)
+            fd = child
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        raise PublisherError(f"Root componente assente, symlink o non-directory: {relative}.") from exc
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def _open_target_parent(root_fd, relative, *, create=False):
     """Apre il parent di un file gestito senza seguire symlink."""
     parts = _target_path_parts(relative)
@@ -544,6 +574,13 @@ def inventory_target_tree(root):
 
     try:
         for component in ALLOWED_COMPONENTS:
+            if component in (ALLOWED_COMPONENTS[0], ALLOWED_COMPONENTS[1]):
+                component_fd = _open_target_component_dir(root_fd, component)
+                try:
+                    walk(component_fd, component)
+                finally:
+                    os.close(component_fd)
+                continue
             parent_fd, leaf = _open_target_parent(root_fd, component)
             try:
                 info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
@@ -556,14 +593,6 @@ def inventory_target_tree(root):
                     row.pop("uid")
                     row.pop("gid")
                     records[component] = row
-                else:
-                    if not stat.S_ISDIR(info.st_mode):
-                        raise PublisherError(f"Componente non-directory: {component}.")
-                    child = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-                    try:
-                        walk(child, component)
-                    finally:
-                        os.close(child)
             finally:
                 os.close(parent_fd)
         return records

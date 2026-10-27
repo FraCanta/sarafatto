@@ -238,6 +238,27 @@ class ProductionArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(publisher.PublisherError, "fuori perimetro"):
             self._verify()
 
+    def test_allowlist_directory_radice_distinta_dai_file_pubblicabili(self):
+        self.assertEqual(publisher._target_directory_parts("themes/sarafatto"),
+                         ["themes", "sarafatto"])
+        self.assertEqual(publisher._target_directory_parts("plugins/sarafatto-core"),
+                         ["plugins", "sarafatto-core"])
+        for path in ("themes", "plugins", "mu-plugins", "themes/altro",
+                     "plugins/altro", "themes/sarafatto/../altro", "/themes/sarafatto"):
+            with self.subTest(path=path):
+                with self.assertRaises(publisher.PublisherError):
+                    publisher._target_directory_parts(path)
+        self.assertEqual(publisher._target_path_parts("themes/sarafatto/functions.php"),
+                         ["themes", "sarafatto", "functions.php"])
+        self.assertEqual(publisher._target_path_parts(
+            "mu-plugins/sarafatto-polylang-front-page-url.php"),
+            ["mu-plugins", "sarafatto-polylang-front-page-url.php"])
+        for path in ("themes/sarafatto", "themes/other/functions.php",
+                     "plugins/other/plugin.php", "mu-plugins/other.php", "../wp-config.php"):
+            with self.subTest(file_path=path):
+                with self.assertRaises(publisher.PublisherError):
+                    publisher._target_path_parts(path)
+
     def test_entry_vite_mancante_rifiutata(self):
         manifest = self.package / "themes/sarafatto/assets/dist/.vite/manifest.json"
         doc = json.loads(manifest.read_text(encoding="utf-8"))
