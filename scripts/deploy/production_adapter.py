@@ -33,6 +33,9 @@ SOURCE_FILES = (
     "scripts/deploy/backup_tool.py",
     "scripts/deploy/release_state_tool.py",
     "scripts/deploy/baseline-inventory.sh",
+    "scripts/deploy/production_publisher.py",
+    "scripts/deploy/request_barrier_tool.py",
+    "scripts/deploy/mu_plugin_migration_tool.py",
 )
 
 
@@ -297,6 +300,14 @@ def inspect_production_state(authorized_sha):
             },
             "live_inventory_sha256": release_state_tool.inventory_digest_json(second_inventory),
             "live_files": len(second_files),
+            # Dettagli limitati ai percorsi gestiti; usati dal planner read-only.
+            # Non costituiscono autorizzazione a pubblicare.
+            "live_file_records": [
+                {"path": name, **second_files[name]} for name in sorted(second_files)
+            ],
+            "current_reference_files": (
+                [] if current_state is None else current_state["reference_files"]
+            ),
             "node_modules_excluded_files": second_exclusion["files"],
             "node_modules_excluded_symlinks": second_exclusion["symlinks"],
             "journal_events": len(journal),

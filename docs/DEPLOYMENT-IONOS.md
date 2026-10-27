@@ -1,6 +1,6 @@
 # Anteprima rilascio IONOS
 
-Questa fase prepara e confronta una release, ma non pubblica file. Il workflow ha esclusivamente il trigger `workflow_dispatch`; non contiene una modalità di deploy reale.
+Questa fase prepara e confronta una release, ma non pubblica file. Il workflow esegue validazione e build su `push` a `main`; `workflow_dispatch` resta disponibile per i dry-run e l'ispezione opzionale. Nessun trigger esegue una pubblicazione.
 
 ## Percorsi e protezioni
 
@@ -215,7 +215,7 @@ Queste fasi non abilitano deploy o rollback reali, non modificano i file applica
 
 ### Workflow manuale
 
-Il workflow mantiene il solo trigger `workflow_dispatch`. `run_remote_state_inspection` è facoltativo e disattivato per default; se abilitato esegue solo `production_adapter.py inspect` via SSH, con chiave e host verificato, e non scrive sul server. Richiede che il repository IONOS sia stato aggiornato manualmente allo SHA del dispatch; altrimenti il controllo fallisce. Non avvia bootstrap, backup, staging o operazioni pubbliche. La build dell'artefatto e il job `remote-dry-run` restano separati.
+Il workflow esegue build e validazione anche su push a `main`. `run_remote_state_inspection` è facoltativo, disattivato per default e attivabile solo da `workflow_dispatch`; se abilitato esegue solo `production_adapter.py inspect` via SSH, con chiave e host verificato, e non scrive sul server. Richiede che il repository IONOS sia stato aggiornato manualmente allo SHA del dispatch; altrimenti il controllo fallisce. Non avvia bootstrap, backup, staging o operazioni pubbliche. La build dell'artefatto e il job `remote-dry-run` restano separati.
 
 ### Runbook e classi di operazione
 
@@ -286,7 +286,7 @@ Un esito `false` per symlink, rename, `flock` o `fsync` blocca ogni strategia ch
 
 I valori `open_basedir`, OPcache, `realpath_cache_*`, SAPI e `include` raccolti dal probe sono quelli di **PHP CLI**, non della configurazione web. Per dimostrare il comportamento reale serve un vhost/docroot PHP isolato, autorizzato e separato dalla webroot attiva, con due release artificiali e richieste HTTP concorrenti che restituiscano la quadrupla di versioni. Non pubblicare script di test sotto `/home/www/public`, non usare il database WordPress e non usare il sito live come banco prova. Se IONOS non offre un ambiente HTTP/PHP-FPM isolato equivalente o non consente di verificare OPcache e il pin della release per richiesta, la compatibilità delle richieste reali resta **non dimostrata** e il deploy deve rimanere bloccato.
 
-Il workflow conserva `workflow_dispatch` come unico trigger e aggiunge soltanto sintassi e test offline del probe al job `validate`; non aggiunge job SSH, backup remoto, deploy o rollback. Le fixture CI sono riproducibili su Ubuntu con:
+Il workflow esegue build e validazione su push a `main` e conserva `workflow_dispatch` per le operazioni manuali. L'aggiunta dei test offline del probe al job `validate` non introduce job SSH, backup remoto, deploy o rollback. Le fixture CI sono riproducibili su Ubuntu con:
 
 ~~~bash
 SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -464,3 +464,85 @@ SARAFATTO_REQUIRE_FLOCK=1 SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 \
 **Limite operativo:** `PUBLIC_WRITE_ENABLED` resta `False`; il sottocomando `install` continua a rifiutare ogni richiesta e non è stato aggiunto publisher o rollback IONOS. Il protocollo fixture non prova proprietà/permessi dell'utente PHP, semantica rename del filesystem remoto, OPcache, richieste PHP-FPM o health check live. Prima di qualunque attivazione futura servono revisione e collaudo separati, inclusa una gestione dimostrata dell'adozione OPcache; nessun comando operativo di migrazione è documentato o abilitato in questa fase.
 
 Non occorre fermare richieste già avviate per proteggere l'integrità del singolo file. Occorre invece provare che il vecchio e il nuovo bytecode siano entrambi compatibili durante la finestra (il codice Polylang invariato e barriera disabilitata soddisfano la compatibilità osservabile dal diff) e non dichiarare la barriera attiva finché OPcache non sia uniformato. Questo non dimostra la sicurezza di una successiva pubblicazione di tema, plugin e MU-plugin insieme.
+# Publisher IONOS: stato implementato e blocchi operativi
+
+Il workflow ora valida e compila anche sui push a `main`. Questo **non pubblica**
+su IONOS. Il trigger `workflow_dispatch` resta disponibile per dry-run e
+ispezione read-only; nessun job di pubblicazione remota è attivo.
+
+`scripts/deploy/production_publisher.py` è l'entrypoint di verifica della release.
+La CI produce package, inventario, archivio `tar.gz` e provenance legati allo SHA
+e al run GitHub; verifica inoltre che i byte dell'archivio corrispondano al
+package, senza estrarre file. La provenance documenta il run e i digest, ma non
+è una firma crittografica autonoma. Il comando `verify-artifact` esegue lo stesso
+controllo offline. `preflight` confronta release, repository IONOS, stato
+corrente e inventario live; accetta input soltanto sotto l'area privata
+`/home/www/sarafatto-deploy/staging`. Il comando `backup` può creare un backup
+fresco esclusivamente nell'area privata, con conferma esplicita e verifica
+della quota. `publish`, `rollback` e `recover` sono ancora bloccati: non esiste
+un writer transazionale di produzione collaudato.
+
+Comandi di sola lettura, da eseguire sul server solo durante il collaudo
+autorizzato:
+
+```sh
+cd /home/www/sarafatto-repo
+SHA='<40 caratteri esadecimali del commit autorizzato>'
+python3 scripts/deploy/production_publisher.py status --authorized-sha "$SHA"
+python3 scripts/deploy/production_publisher.py preflight \
+  --release-sha "$SHA" \
+  --package /home/www/sarafatto-deploy/staging/incoming/sarafatto-release \
+  --inventory /home/www/sarafatto-deploy/staging/incoming/sarafatto-inventory.tsv \
+  --provenance /home/www/sarafatto-deploy/staging/incoming/sarafatto-provenance.json \
+  --archive /home/www/sarafatto-deploy/staging/incoming/sarafatto-release.tar.gz \
+  --run-id '<ID del run GitHub verificato>'
+```
+
+`preflight` è read-only e richiede che i file siano già presenti nell'area
+privata. Il workflow attuale non li trasferisce su IONOS: nessun job SSH di
+pubblicazione o trasferimento è abilitato. Lo SHA/run ID devono essere verificati
+rispetto alla pagina del workflow e all'artefatto scaricato. L'esito resta
+bloccato finché non esistono il writer transazionale e prove fresche della
+barriera PHP web e del comportamento OPcache uniforme.
+
+Creazione di un backup (scrive soltanto nell'area privata; non è un deploy):
+
+```sh
+python3 scripts/deploy/production_publisher.py backup \
+  --account-quota-free-bytes 123456789 \
+  --confirm 'CREATE-BACKUP 07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd'
+```
+
+Sostituire `123456789` con la quota libera effettivamente verificata; non
+eseguire il comando con il valore d'esempio.
+
+I comandi seguenti sono intenzionalmente fail-closed e non costituiscono
+procedure operative finché il writer non viene implementato, revisionato e
+collaudato:
+
+```sh
+python3 scripts/deploy/production_publisher.py publish \
+  --release-sha "$SHA" --package '<artefatto>' --inventory '<inventario>' \
+  --provenance '<provenance>' --archive '<archivio>' --run-id '<run GitHub>'
+python3 scripts/deploy/production_publisher.py rollback --operation-id '<id>' --backup-id '<id>' --manifest-sha256 '<digest>'
+python3 scripts/deploy/production_publisher.py recover --operation-id '<id>'
+```
+
+Non impostare gate o Secrets per tentare di attivare la pubblicazione: il
+workflow non contiene un job di scrittura e il CLI rifiuta `publish`, `rollback`
+e `recover`. Prima dell'implementazione di tali transazioni servono almeno:
+
+1. Prova HTTP/PHP fresca che dimostri lock condiviso per tutta la richiesta,
+   marker di manutenzione e rifiuto delle nuove richieste.
+2. Prova che il lock esclusivo CLI dreni le richieste già iniziate, con timeout
+   finito e recupero del marker dopo interruzione.
+3. Evidenza su IONOS che OPcache non continui a servire codice differente tra
+   worker dopo la sostituzione e il rilascio del lock.
+4. Implementazione e test Linux del journal/state writer, della transazione
+   pubblica, dell'health check e del rollback, senza usare le fixture come
+   publisher.
+5. Trasferimento autenticato dell'artefatto in area privata con digest verificato
+   da un dato indipendente del run GitHub.
+
+Fino ad allora i push su `main` eseguono CI e build dell'artefatto; non viene
+effettuata alcuna connessione SSH automatica né alcuna modifica a WordPress.
