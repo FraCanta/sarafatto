@@ -262,11 +262,19 @@ def inspect_production_state(authorized_sha):
         second_files, second_exclusion, second_raw_digest, second_inventory = _canonical_live_inventory(second)
         if first_raw_digest != second_raw_digest:
             raise ProductionAdapterError("Filesystem pubblico variato tra i due inventari freschi.")
-        backup_tool.compare_inventory_to_baseline(second_files, [], second_exclusion, expected)
+        live_reference = expected
+        if current_state is not None:
+            live_reference = {
+                row["path"]: {key: row[key] for key in ("sha256", "size", "mode", "classification")}
+                for row in current_state["reference_files"]
+            }
+        backup_tool.compare_inventory_to_baseline(second_files, [], second_exclusion, live_reference)
 
         journal = release_state_tool.read_journal_at(state_fd)
         try:
             release_state_tool.unresolved_operation(journal)
+            if current_state is not None:
+                release_state_tool.validate_component_migration_journal(current_state, journal)
         except release_state_tool.ReleaseStateError as exc:
             raise ProductionAdapterError(f"Journal con operazione irrisolta: {exc}") from exc
         if current_state is not None:

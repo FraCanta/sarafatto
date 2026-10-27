@@ -29,10 +29,17 @@ JOURNAL_NAME = "operation-journal.jsonl"
 MAX_STATE_BYTES = 20_000_000
 MAX_JOURNAL_BYTES = 5_000_000
 INITIAL_BASELINE_SHA256 = "07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd"
+MU_MIGRATION_TARGET = "mu-plugins/sarafatto-polylang-front-page-url.php"
+MU_MIGRATION_SOURCE_COMMIT = "50bbe01af38814f41d5a67bb37fef45b181f5fd1"
+MU_MIGRATION_OLD_SHA256 = "2ffd84b3f170ec2e0eae1cab5935391bb8e9d5311e3c55025719ab60d1417252"
+MU_MIGRATION_NEW_SHA256 = "1b4d430566abf2b01e3e22512212e2f03f623450e207366e63f02d97e85d4c7f"
+MU_MIGRATION_BACKUP_ID = "20261024T181841Z-bdcc8d63457a"
+MU_MIGRATION_BACKUP_MANIFEST_SHA256 = "c502c1fe239515ff3324a4c55e77443c9a6ab7b8e6c77d4e3472a3d84ab369ae"
 OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 OPERATION_STATES = (
     "prepared", "backup_verified", "publishing", "files_verified",
     "health_verified", "committed", "recovery_required",
+    "component_migrated", "component_rolled_back",
 )
 
 
@@ -190,8 +197,8 @@ def validate_state_document(document, expected_baseline_sha=None):
             or not isinstance(release.get("release_id"), str)
             or verification.get("status") != "verified-current"):
         raise ReleaseStateError("Riferimenti o stato di verifica current-release non validi.")
-    # In Fase 3D.1 l'unica provenienza producibile è il bootstrap iniziale.
-    # Stati post-deploy restano rifiutati fino a un futuro verificatore di transazione.
+    # Il commit della release applicativa resta quello della baseline. Una sola
+    # eccezione di stato può registrare la migrazione del MU-plugin autorizzato.
     if (provenance.get("kind") != "initial-baseline-content-match"
             or provenance.get("baseline_provenance") != "bootstrap-content-match"
             or release.get("commit_sha") != baseline_info.get("commit_sha")
@@ -234,12 +241,17 @@ def validate_state_document(document, expected_baseline_sha=None):
             or not isinstance(document.get("last_successful_operation"), dict)):
         raise ReleaseStateError("Campi operativi non iniziali current-release non supportati in questa fase.")
     last = document["last_successful_operation"]
-    if (not OPERATION_ID_RE.fullmatch(str(last.get("operation_id", "")))
-            or last.get("status") != "verified"
-            or last.get("kind") != "verified-content-bootstrap"
-            or last.get("operation_id") != "baseline-bootstrap-" + release["commit_sha"][:12]
-            or not isinstance(last.get("completed_at_utc"), str)):
-        raise ReleaseStateError("Ultima operazione conclusa current-release non valida.")
+    migration = document.get("component_migration")
+    if migration is None:
+        if (not OPERATION_ID_RE.fullmatch(str(last.get("operation_id", "")))
+                or last.get("status") != "verified"
+                or last.get("kind") != "verified-content-bootstrap"
+                or last.get("operation_id") != "baseline-bootstrap-" + release["commit_sha"][:12]
+                or not isinstance(last.get("completed_at_utc"), str)):
+            raise ReleaseStateError("Ultima operazione conclusa current-release non valida.")
+    else:
+        if not isinstance(migration, dict):
+            raise ReleaseStateError("Record migrazione MU-plugin non valido.")
     reference_files = document.get("reference_files")
     if not isinstance(reference_files, list) or len(reference_files) != len(files):
         raise ReleaseStateError("Snapshot file di riferimento assente o incoerente.")
@@ -254,7 +266,49 @@ def validate_state_document(document, expected_baseline_sha=None):
                 or not isinstance(row.get("classification"), str)):
             raise ReleaseStateError(f"File di riferimento incoerente: {path}.")
         seen_reference.add(path)
+    if migration is not None:
+        _validate_mu_migration_state(document, migration, last)
     return document
+
+
+def _validate_mu_migration_state(document, migration, last):
+    """Accetta solo il delta MU-plugin fissato; non promuove il commit applicativo."""
+    required = {
+        "schema_version", "kind", "status", "operation_id", "target",
+        "source_commit_sha", "old_sha256", "new_sha256", "backup_id",
+        "backup_manifest_sha256", "baseline_sha256", "previous_state_sha256",
+        "previous_inventory_sha256", "verified_at_utc",
+    }
+    status = migration.get("status") if isinstance(migration, dict) else None
+    expected_current = MU_MIGRATION_NEW_SHA256 if status == "installed" else MU_MIGRATION_OLD_SHA256
+    if (not isinstance(migration, dict) or set(migration) != required
+            or migration.get("schema_version") != 1
+            or migration.get("kind") != "single-mu-plugin-migration"
+            or status not in ("installed", "rolled_back")
+            or not OPERATION_ID_RE.fullmatch(str(migration.get("operation_id", "")))
+            or migration.get("target") != MU_MIGRATION_TARGET
+            or migration.get("source_commit_sha") != MU_MIGRATION_SOURCE_COMMIT
+            or migration.get("old_sha256") != MU_MIGRATION_OLD_SHA256
+            or migration.get("new_sha256") != MU_MIGRATION_NEW_SHA256
+            or migration.get("backup_id") != MU_MIGRATION_BACKUP_ID
+            or migration.get("backup_manifest_sha256") != MU_MIGRATION_BACKUP_MANIFEST_SHA256
+            or migration.get("baseline_sha256") != document["initial_baseline"].get("sha256")
+            or not re.fullmatch(r"[a-f0-9]{64}", str(migration.get("previous_state_sha256", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(migration.get("previous_inventory_sha256", "")))
+            or not isinstance(migration.get("verified_at_utc"), str)
+            or last.get("operation_id") != migration.get("operation_id")
+            or last.get("kind") != "mu-plugin-migration"
+            or last.get("status") != "verified"
+            or last.get("completed_at_utc") != migration.get("verified_at_utc")):
+        raise ReleaseStateError("Record migrazione MU-plugin non autorizzato o incoerente.")
+    rows = {row["path"]: row for row in document["reference_files"]}
+    target = rows.get(MU_MIGRATION_TARGET)
+    if not target or target.get("sha256") != expected_current:
+        raise ReleaseStateError("Hash MU-plugin current-release non corrisponde alla migrazione registrata.")
+    inventory_rows = {row["path"]: row for row in document["inventory"].get("files", [])}
+    if inventory_rows != {path: {key: row[key] for key in ("path", "sha256", "size", "mode")}
+                          for path, row in rows.items()}:
+        raise ReleaseStateError("Inventario e reference_files divergono nello stato migrato.")
 
 
 def read_journal_at(state_fd, *, allow_fixture_committed=False):
@@ -295,9 +349,11 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
         "files_verified": {"health_verified", "recovery_required"},
         # Nessuna transizione a committed è ammessa finché manca il verificatore
         # della transazione di pubblicazione previsto per una fase successiva.
-        "health_verified": ({"committed", "recovery_required"} if allow_fixture_committed
-                             else {"recovery_required"}),
-        "committed": set(), "recovery_required": set(),
+        "health_verified": ({"committed", "component_migrated", "component_rolled_back", "recovery_required"}
+                             if allow_fixture_committed else
+                             {"component_migrated", "component_rolled_back", "recovery_required"}),
+        "committed": set(), "component_migrated": set(), "component_rolled_back": set(),
+        "recovery_required": set(),
     }
     for number, line in enumerate(raw.splitlines(), 1):
         event = _read_json(line, f"journal riga {number}")
@@ -323,16 +379,36 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("plan_sha256", "")))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("final_inventory_sha256", "")))):
                 raise ReleaseStateError("Evento committed rifiutato: solo il verificatore fixture può registrarlo.")
+        if status in ("component_migrated", "component_rolled_back"):
+            details = event["details"]
+            expected_current = MU_MIGRATION_NEW_SHA256 if status == "component_migrated" else MU_MIGRATION_OLD_SHA256
+            if (details.get("operation_kind") != "mu-plugin-migration"
+                    or details.get("target") != MU_MIGRATION_TARGET
+                    or details.get("source_commit_sha") != MU_MIGRATION_SOURCE_COMMIT
+                    or details.get("old_sha256") != MU_MIGRATION_OLD_SHA256
+                    or details.get("new_sha256") != MU_MIGRATION_NEW_SHA256
+                    or details.get("current_sha256") != expected_current
+                    or details.get("backup_id") != MU_MIGRATION_BACKUP_ID
+                    or details.get("backup_manifest_sha256") != MU_MIGRATION_BACKUP_MANIFEST_SHA256
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("baseline_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("new_state_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("final_inventory_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("backup_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("plan_sha256", "")))
+                    or status == "component_rolled_back" and not OPERATION_ID_RE.fullmatch(str(details.get("rollback_of", "")))
+                    or status == "component_migrated" and details.get("rollback_of") is not None):
+                raise ReleaseStateError("Evento terminale MU-plugin non autorizzato o incompleto.")
         if journal_operation_id is None:
             journal_operation_id = operation_id
         elif operation_id != journal_operation_id:
             previous_status = operation_status.get(journal_operation_id)
             completed_by_rollback = (
-                allow_fixture_committed and previous_status == "recovery_required"
+                previous_status in ("recovery_required", "component_migrated")
                 and status == "prepared"
                 and event["details"].get("rollback_of") == journal_operation_id
             )
-            if not allow_fixture_committed or (previous_status != "committed" and not completed_by_rollback):
+            completed = previous_status in ("committed", "component_rolled_back")
+            if not completed and not completed_by_rollback:
                 raise ReleaseStateError("Journal con operazioni intercalate o ID duplicati non consentiti.")
             journal_operation_id = operation_id
         prior_status = operation_status.get(operation_id)
@@ -348,9 +424,10 @@ def unresolved_operation(events, *, allow_fixture_committed=False):
     active = {}
     for event in events:
         operation_id = event["operation_id"]
-        if event["status"] == "committed":
-            if (not allow_fixture_committed or event.get("details", {}).get("fixture_only") is not True):
-                raise ReleaseStateError("Evento committed rifiutato: nessun verificatore fixture autorizzato.")
+        if event["status"] in ("committed", "component_migrated", "component_rolled_back"):
+            if event["status"] == "committed":
+                if (not allow_fixture_committed or event.get("details", {}).get("fixture_only") is not True):
+                    raise ReleaseStateError("Evento committed rifiutato: nessun verificatore fixture autorizzato.")
             active.pop(operation_id, None)
             rollback_of = event.get("details", {}).get("rollback_of")
             if rollback_of is not None:
@@ -370,8 +447,8 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
     """Aggiunge un evento sotto site-operation.lock; non pubblica né committa release."""
     if not OPERATION_ID_RE.fullmatch(str(operation_id)) or status not in OPERATION_STATES:
         raise ReleaseStateError("ID o stato operazione non validi.")
-    if status == "committed":
-        raise ReleaseStateError("La conferma committed richiede il futuro verificatore di deploy.")
+    if status in ("committed", "component_migrated", "component_rolled_back"):
+        raise ReleaseStateError("La conferma terminale richiede il verificatore specifico della transazione.")
     if not isinstance(details, dict):
         raise ReleaseStateError("Dettagli evento non validi.")
     if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
@@ -424,6 +501,52 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
 def load_current_state(state_fd, expected_baseline_sha=None):
     raw = _read_at(state_fd, STATE_NAME, "Stato release corrente", MAX_STATE_BYTES)
     return validate_state_document(_read_json(raw, "current-release"), expected_baseline_sha)
+
+
+def validate_component_migration_journal(state, events):
+    """Collega lo stato MU-plugin al terminale hash-chain corrispondente."""
+    migration = state.get("component_migration")
+    if migration is None:
+        return
+    terminal_status = "component_migrated" if migration["status"] == "installed" else "component_rolled_back"
+    terminal = next((event for event in reversed(events)
+                     if event["operation_id"] == migration["operation_id"]
+                     and event["status"] == terminal_status), None)
+    if terminal is None:
+        raise ReleaseStateError("Stato MU-plugin senza evento terminale verificato nel journal.")
+    operation = [event for event in events if event["operation_id"] == migration["operation_id"]]
+    expected_states = ["prepared", "backup_verified", "publishing", "files_verified",
+                       "health_verified", terminal_status]
+    if [event["status"] for event in operation] != expected_states:
+        raise ReleaseStateError("Sequenza journal della migrazione MU-plugin incompleta o duplicata.")
+    details = terminal["details"]
+    prepared = operation[0]["details"]
+    backup_event = operation[1]["details"]
+    files_event = operation[3]["details"]
+    expected_current = MU_MIGRATION_NEW_SHA256 if migration["status"] == "installed" else MU_MIGRATION_OLD_SHA256
+    if (prepared.get("operation_kind") != ("mu-plugin-migration" if migration["status"] == "installed"
+                                             else "mu-plugin-rollback")
+            or prepared.get("target") != MU_MIGRATION_TARGET
+            or prepared.get("source_commit_sha") != MU_MIGRATION_SOURCE_COMMIT
+            or prepared.get("old_sha256") != MU_MIGRATION_OLD_SHA256
+            or prepared.get("new_sha256") != MU_MIGRATION_NEW_SHA256
+            or prepared.get("backup_id") != MU_MIGRATION_BACKUP_ID
+            or prepared.get("backup_manifest_sha256") != MU_MIGRATION_BACKUP_MANIFEST_SHA256
+            or prepared.get("old_state_sha256") != migration.get("previous_state_sha256")
+            or backup_event.get("backup_sha256") != prepared.get("backup_sha256")
+            or files_event.get("installed_sha256") != expected_current
+            or details.get("plan_sha256") != prepared.get("plan_sha256")
+            or details.get("backup_sha256") != prepared.get("backup_sha256")
+            or details.get("new_state_sha256") != state.get("state_sha256")
+            or details.get("final_inventory_sha256") != state.get("inventory_sha256")
+            or details.get("baseline_sha256") != migration.get("baseline_sha256")
+            or details.get("current_sha256") != expected_current
+            or details.get("backup_manifest_sha256") != migration.get("backup_manifest_sha256")
+            or migration["status"] == "rolled_back"
+            and (details.get("rollback_of") != prepared.get("rollback_of")
+                 or not any(event["operation_id"] == prepared.get("rollback_of")
+                            and event["status"] == "component_migrated" for event in events))):
+        raise ReleaseStateError("Journal terminale e current-release MU-plugin non concordano.")
 
 
 def _open_dir(parent_fd, name):

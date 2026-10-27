@@ -39,8 +39,8 @@ BACKUP_DIRECTORY_NAME = OFFICIAL_BACKUP_ID
 BACKUP_ATTESTATION_NAME = "mu-plugin-backup-attestation.json"
 
 BLOCKERS = (
-    "Il backup ufficiale è configurato con digest indipendente noto; l'attestazione effettiva su IONOS resta da eseguire in sola lettura prima della migrazione.",
-    "current-release.json accetta solo il bootstrap iniziale: manca una transizione journal/state specifica che registri il delta del solo MU-plugin senza dichiarare pubblicata l'intera release.",
+    "Il backup ufficiale è stato verificato su IONOS con digest indipendente; ripetere verify-backup in sola lettura prima di qualsiasi futura transazione.",
+    "La transizione journal/current-release è implementata soltanto nella fixture offline; manca ancora un verificatore e writer di produzione revisionato e autorizzato.",
     "Dopo l'installazione, l'adozione uniforme del nuovo opcode da parte dei worker PHP web non è dimostrabile con una singola richiesta HTTP; la barriera non può essere armata finché IONOS non fornisce un metodo verificabile di invalidazione/riavvio o attestazione completa dei worker.",
     "Manca una verifica post-migrazione che controlli hash live, risposta WordPress/Polylang e adozione del nuovo opcode; la cache realpath non implica sorgente parziale, ma OPcache può continuare a servire il bytecode precedente.",
 )

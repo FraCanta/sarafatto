@@ -545,15 +545,18 @@ def _write_private_file(directory, name, data, mode=0o600):
 
 
 def _current_state(workspace):
-    baseline_path = workspace.state_dir / "baseline.json"
-    state_path = workspace.state_dir / release_state.STATE_NAME
-    baseline_raw = _read_file_bytes(baseline_path, MAX_JSON)
+    state_fd = os.open(workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        baseline_doc = json.loads(baseline_raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise TransactionError("Baseline fixture malformata.") from exc
+        baseline_raw, _ = _read_at(state_fd, "baseline.json", MAX_JSON)
+        state_raw, _ = _read_at(state_fd, release_state.STATE_NAME, MAX_JSON)
+    finally:
+        os.close(state_fd)
+    try:
+        baseline_doc = release_state._read_json(baseline_raw, "baseline fixture")
+        state = release_state._read_json(state_raw, "current-release fixture")
+    except release_state.ReleaseStateError as exc:
+        raise TransactionError("Baseline o current-release fixture malformati.") from exc
     baseline_sha = _sha(baseline_raw)
-    state = _read_json_file(state_path)
     try:
         release_state.validate_state_document(state, baseline_sha)
     except release_state.ReleaseStateError as exc:
@@ -572,9 +575,25 @@ def _current_state(workspace):
             if row["path"] in baseline_rows:
                 raise TransactionError("Percorso duplicato nella baseline fixture.")
             baseline_rows[row["path"]] = normalized
+    state_rows = {row["path"]: row for row in state["reference_files"]}
+    migration = state.get("component_migration")
+    if migration is None:
+        references_match = baseline_rows == state_rows
+    else:
+        target = release_state.MU_MIGRATION_TARGET
+        expected_hash = (release_state.MU_MIGRATION_NEW_SHA256
+                         if migration.get("status") == "installed"
+                         else release_state.MU_MIGRATION_OLD_SHA256)
+        references_match = (
+            set(baseline_rows) == set(state_rows)
+            and all(state_rows[path] == baseline_rows[path] for path in baseline_rows if path != target)
+            and target in state_rows
+            and state_rows[target].get("sha256") == expected_hash
+            and state_rows[target].get("classification") == baseline_rows.get(target, {}).get("classification")
+        )
     if (baseline_doc.get("release", {}).get("commit_sha") != state["initial_baseline"]["commit_sha"]
             or baseline_doc.get("release", {}).get("release_id") != state["initial_baseline"]["release_id"]
-            or baseline_rows != {row["path"]: row for row in state["reference_files"]}):
+            or not references_match):
         raise TransactionError("Baseline fixture non concorda con lo stato corrente registrato.")
     return baseline_doc, baseline_sha, state
 
@@ -829,9 +848,9 @@ def _write_journal_event(workspace, operation_id, status, details, *, verified_c
         lock_fd = None if lock_already_held else baseline.acquire_baseline_lock(None, locks_fd)
         events = release_state.read_journal_at(state_fd, allow_fixture_committed=True)
         previous = events[-1]["event_sha256"] if events else "0" * 64
-        if events and events[-1]["status"] not in ("committed",):
+        if events and events[-1]["status"] not in ("committed", "component_migrated", "component_rolled_back"):
             if events[-1]["operation_id"] != operation_id and not (
-                    events[-1]["status"] == "recovery_required" and status == "prepared"
+                    events[-1]["status"] in ("recovery_required", "component_migrated") and status == "prepared"
                     and details.get("rollback_of") == events[-1]["operation_id"]):
                 raise TransactionError("Transazione precedente irrisolta.")
         if status == "committed" and (not verified_commit or details.get("fixture_only") is not True):
@@ -915,8 +934,14 @@ def _load_verified_backup(workspace, backup_id, expected_digest=None):
             or not re.fullmatch(r"[a-f0-9]{64}", str(doc.get("current_state_sha256", "")))):
         raise TransactionError("Backup non riconosciuto come fixture.")
     _, baseline_sha, current_state = _current_state(workspace)
+    migrated = current_state.get("component_migration")
+    migrated_backup_match = (
+        migrated is not None
+        and migrated.get("backup_id") == backup_id
+        and migrated.get("baseline_sha256") == baseline_sha
+    )
     if (doc["baseline_sha256"] != baseline_sha
-            or doc["current_state_sha256"] != current_state["state_sha256"]):
+            or doc["current_state_sha256"] != current_state["state_sha256"] and not migrated_backup_match):
         raise TransactionError("Backup fixture riferito a baseline/stato differenti.")
     records, data = {}, {}
     for row in doc.get("files", []):

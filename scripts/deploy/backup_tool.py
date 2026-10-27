@@ -454,6 +454,8 @@ def backup_reference(state_fd, baseline_document, baseline_digest, baseline_comm
             current = release_state.load_current_state(state_fd, baseline_digest)
         events = release_state.read_journal_at(state_fd)
         release_state.unresolved_operation(events)
+        if current is not None:
+            release_state.validate_component_migration_journal(current, events)
     except release_state.ReleaseStateError as exc:
         raise BackupError(f"Stato release o journal non valido: {exc}") from exc
     if current is None:
@@ -467,16 +469,36 @@ def backup_reference(state_fd, baseline_document, baseline_digest, baseline_comm
         {"path": path, **{key: baseline_expected[path][key] for key in ("sha256", "size", "mode")}}
         for path in sorted(baseline_expected)
     ]
+    migration = current.get("component_migration")
     if (provenance.get("kind") != "initial-baseline-content-match"
             or provenance.get("baseline_provenance") != baseline_document.get("provenance")
             or current["release"].get("commit_sha") != baseline_commit
-            or current["release"].get("release_id") != baseline_release.get("release_id")
-            or current_snapshot != expected_snapshot
-            or current_inventory_files != expected_inventory):
+            or current["release"].get("release_id") != baseline_release.get("release_id")):
         raise BackupError(
             "Lo stato current-release non è una fotografia iniziale verificata della baseline; "
             "serve il futuro aggiornamento legato a una transazione verificata."
         )
+    if migration is None:
+        if current_snapshot != expected_snapshot or current_inventory_files != expected_inventory:
+            raise BackupError("Stato current-release iniziale diverso dalla baseline.")
+    else:
+        # Il validatore dello stato consente unicamente la migrazione MU-plugin
+        # fissata e verifica digest, backup, commit e hash del target.
+        baseline_by_path = {row["path"]: row for row in expected_snapshot}
+        current_by_path = {row["path"]: row for row in current_snapshot}
+        current_inventory_by_path = {row["path"]: row for row in current_inventory_files}
+        target = release_state.MU_MIGRATION_TARGET
+        expected_target = (release_state.MU_MIGRATION_NEW_SHA256
+                           if migration.get("status") == "installed"
+                           else release_state.MU_MIGRATION_OLD_SHA256)
+        if (set(current_by_path) != set(baseline_by_path)
+                or set(current_inventory_by_path) != set(baseline_by_path)
+                or any(current_by_path[path] != baseline_by_path[path]
+                       for path in baseline_by_path if path != target)
+                or current_by_path.get(target, {}).get("sha256") != expected_target
+                or any(current_inventory_by_path[path].get(key) != current_by_path[path].get(key)
+                       for path in current_by_path for key in ("sha256", "size", "mode"))):
+            raise BackupError("Current-release contiene differenze oltre la migrazione MU-plugin autorizzata.")
     rows = current["reference_files"]
     expected = {row["path"]: row for row in rows}
     if len(expected) != len(rows) or not expected:

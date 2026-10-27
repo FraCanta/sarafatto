@@ -427,7 +427,7 @@ Il comando acquisisce `site-operation.lock` e riusa `backup_tool.py`. Controlla 
 ### Blocchi specifici della migrazione a file singolo
 
 1. **Verifica server-side del backup:** il verificatore è vincolato all'ID ufficiale e al digest indipendente noto. La sua esecuzione read-only su IONOS resta necessaria per attestare che i byte presenti sul server corrispondano. Il backup dedicato manuale resta conservato, ma non è una prova sostitutiva.
-2. **Journal e stato corrente:** `release_state_tool.py` convalida solo lo stato iniziale. Serve una transizione dedicata che registri il vecchio e nuovo hash del MU-plugin, il riferimento alla release base, il backup verificato e l'inventario pubblico finale. Non deve etichettare il commit `50bbe01…` come release interamente pubblicata: tema e plugin custom restano alla release `911d6a…`. Fino a tale transizione, `current-release.json` non va modificato.
+2. **Journal e stato corrente:** è stata aggiunta una rappresentazione versionata e strettamente vincolata per il solo delta MU-plugin. Il commit della release applicativa resta quello della baseline (`911d6…`); il commit candidato è registrato separatamente come provenienza del componente. La baseline resta immutabile e il journal terminale deve concordare con il digest del nuovo current-release e dell'inventario. Il protocollo è implementato e testato solo sulle fixture locali; non esiste un comando di scrittura pubblica.
 3. **OPcache e operatività della barriera:** un singolo endpoint HTTP non può attestare ogni worker. Dopo la sostituzione si può mantenere `request-barrier.json` disabilitato e il sito continua a ricevere richieste: vecchio e nuovo codice completo sono compatibili per il comportamento Polylang. Prima di abilitare la barriera, IONOS deve fornire un'azione verificabile di invalidazione/riavvio del pool PHP, oppure un meccanismo di attestazione che copra tutti i worker e le richieste instradate. Se nessuno dei due esiste, la barriera resta non attivabile e non si può iniziare il deploy multi-componente.
 4. **Verifica applicativa:** eseguire lint PHP compatibile e controlli HTTP ripetuti di WordPress/Polylang, verificando hash live e versione del codice servita. La procedura di status attuale non effettua tali controlli.
 
@@ -445,5 +445,22 @@ sha256sum "$candidate"
 ~~~
 
 Non estrarre il TAR nella webroot e non ripristinare gli altri membri. La copia candidata resta in staging privata; il writer che effettua lo swap atomico del solo pathname pubblico non è implementato né abilitato.
+
+### Protocollo fixture della Fase 5
+
+`mu_plugin_transaction_fixture_tool.py` fornisce API senza CLI, utilizzabili soltanto con un `FixtureWorkspace` creato e validato da `transaction_fixture_tool.py`. La fixture contiene un backup sintetico legato alla baseline di test e una prova ufficiale simulata con ID/digest fissati: non sostituisce l'esecuzione reale di `verify-backup` e non attesta il backup IONOS.
+
+La simulazione segue la sequenza `prepared → backup_verified → publishing → files_verified → health_verified → component_migrated`. Il rollback usa una nuova operazione legata all'ID della migrazione e termina con `component_rolled_back`. Un arresto lascia il journal non terminale, che blocca le altre operazioni; `recover_migration()` riconcilia solo combinazioni verificate di journal, file e current-release. Un drift o un backup alterato viene rifiutato senza sovrascrivere il file inatteso. Le directory di staging orfane dopo un arresto prima del primo evento non vengono rimosse automaticamente.
+
+`current-release.json` mantiene `release.commit_sha` e `release_id` della baseline e aggiunge `component_migration` per registrare esclusivamente target, hash precedente/nuovo, commit sorgente autorizzato, backup ufficiale, digest dello stato precedente e stato installato/ripristinato. `backup_tool.py` usa la fotografia corrente solo se il delta è esattamente quello autorizzato; `production_adapter.py inspect` confronta il live con tale fotografia e richiede il terminale journal corrispondente. Queste integrazioni sono soggette ai test CI e non autorizzano da sole scritture.
+
+Test locali/CI:
+
+~~~bash
+SARAFATTO_REQUIRE_FLOCK=1 SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/deploy/test_mu_plugin_transaction_fixture_tool.py
+~~~
+
+**Limite operativo:** `PUBLIC_WRITE_ENABLED` resta `False`; il sottocomando `install` continua a rifiutare ogni richiesta e non è stato aggiunto publisher o rollback IONOS. Il protocollo fixture non prova proprietà/permessi dell'utente PHP, semantica rename del filesystem remoto, OPcache, richieste PHP-FPM o health check live. Prima di qualunque attivazione futura servono revisione e collaudo separati, inclusa una gestione dimostrata dell'adozione OPcache; nessun comando operativo di migrazione è documentato o abilitato in questa fase.
 
 Non occorre fermare richieste già avviate per proteggere l'integrità del singolo file. Occorre invece provare che il vecchio e il nuovo bytecode siano entrambi compatibili durante la finestra (il codice Polylang invariato e barriera disabilitata soddisfano la compatibilità osservabile dal diff) e non dichiarare la barriera attiva finché OPcache non sia uniformato. Questo non dimostra la sicurezza di una successiva pubblicazione di tema, plugin e MU-plugin insieme.
