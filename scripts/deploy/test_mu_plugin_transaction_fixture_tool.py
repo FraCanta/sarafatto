@@ -198,6 +198,17 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
         events = tx._load_fixture_journal(self.workspace)
         tx.release_state.validate_component_migration_journal(state, events)
         tx.release_state.unresolved_operation(events, allow_fixture_committed=True)
+        terminal = events[-1]
+        self.assertEqual(terminal["status"], "component_migrated")
+        self.assertEqual(terminal["operation_id"], result["operation_id"])
+        self.assertEqual(terminal["details"]["final_inventory_sha256"], state["inventory_sha256"])
+        self.assertEqual(terminal["details"]["final_records_sha256"],
+                         tx._records_digest(tx._current_records(self.workspace)))
+        self.assertEqual(result["final_inventory_sha256"], state["inventory_sha256"])
+        altered_events = [dict(event, details=dict(event["details"])) for event in events]
+        altered_events[-1]["details"]["final_records_sha256"] = "0" * 64
+        with self.assertRaises(tx.release_state.ReleaseStateError):
+            tx.release_state.validate_component_migration_journal(state, altered_events)
         state_fd = os.open(self.workspace.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             baseline_doc, baseline_sha, baseline_commit, baseline_expected = backup_tool.validate_backup_baseline(
@@ -281,8 +292,13 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
                     self.workspace, official_backup_proof=self.proof)
                 self.assertEqual(result["status"], "recovered-fixture")
                 state = tx._current_state(self.workspace)[2]
-                tx.release_state.validate_component_migration_journal(
-                    state, tx._load_fixture_journal(self.workspace))
+                recovered_events = tx._load_fixture_journal(self.workspace)
+                tx.release_state.validate_component_migration_journal(state, recovered_events)
+                self.assertEqual(recovered_events[-1]["status"], "component_migrated")
+                self.assertEqual(recovered_events[-1]["details"]["new_state_sha256"],
+                                 state["state_sha256"])
+                self.assertEqual(recovered_events[-1]["details"]["final_inventory_sha256"],
+                                 state["inventory_sha256"])
 
     def test_07_crash_prima_del_journal_non_modifica_live(self):
         with self.assertRaises(migration.SimulatedCrash):
@@ -320,7 +336,11 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
         self.assertEqual({p for p in before if before[p] != after[p]}, {self.target})
         state = tx._current_state(self.workspace)[2]
         self.assertEqual(state["component_migration"]["status"], "rolled_back")
-        tx.release_state.validate_component_migration_journal(state, tx._load_fixture_journal(self.workspace))
+        events = tx._load_fixture_journal(self.workspace)
+        tx.release_state.validate_component_migration_journal(state, events)
+        self.assertEqual(events[-1]["status"], "component_rolled_back")
+        self.assertEqual(events[-1]["details"]["rollback_of"], published["operation_id"])
+        self.assertEqual(events[-1]["details"]["final_inventory_sha256"], state["inventory_sha256"])
 
     def test_09_rollback_drift_backup_alterato_e_path_arbitrario_bloccati(self):
         published = self.run_migration()

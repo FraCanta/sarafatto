@@ -36,8 +36,15 @@ class SimulatedCrash(BaseException):
     """Interruzione non recuperata dalla transazione, come SIGKILL/crash."""
 
 
+def _validate_migration_workspace(workspace):
+    try:
+        return tx._validate_workspace(workspace)
+    except tx.TransactionError as exc:
+        raise MigrationFixtureError(f"Workspace fixture non autorizzato: {exc}") from exc
+
+
 def operation_approval(workspace, fixture_backup_sha256):
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     if not re.fullmatch(r"[a-f0-9]{64}", str(fixture_backup_sha256)):
         raise MigrationFixtureError("Digest backup fixture non valido.")
     scope = hashlib.sha256(str(workspace.root).encode("utf-8")).hexdigest()[:16]
@@ -148,7 +155,7 @@ def _journal(workspace, operation_id, status, details):
 
 def _verify_inputs(workspace, candidate, candidate_commit, backup_id, backup_sha256,
                    official_backup_proof):
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     if candidate_commit != SOURCE_COMMIT or hashlib.sha256(candidate).hexdigest() != NEW_SHA:
         raise MigrationFixtureError("Commit o SHA candidato non autorizzato.")
     if backup_id != BACKUP_ID:
@@ -183,7 +190,7 @@ def _verify_inputs(workspace, candidate, candidate_commit, backup_id, backup_sha
 
 
 def _stage(workspace, operation_id, candidate, original, mode):
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     if not isinstance(operation_id, str) or not MIGRATION_OPERATION_ID_RE.fullmatch(operation_id):
         raise MigrationFixtureError("ID operazione staging non valido.")
     if not isinstance(candidate, bytes) or not isinstance(original, bytes):
@@ -298,7 +305,7 @@ def _atomic_target_replace(workspace, data, mode, expected_sha):
 def _commit(workspace, operation_id, backup_digest, plan_sha, *, rollback_of=None):
     _, _, state = tx._current_state(workspace)
     records = tx._current_records(workspace)
-    final_digest = tx._records_digest(records)
+    final_records_digest = tx._records_digest(records)
     if state["inventory_sha256"] != state_tool.inventory_digest_json({
             "files": [{key: row[key] for key in ("path", "sha256", "size", "mode")}
                       for _, row in sorted(records.items())],
@@ -308,7 +315,9 @@ def _commit(workspace, operation_id, backup_digest, plan_sha, *, rollback_of=Non
         raise MigrationFixtureError("current-release e inventario live non coincidono prima del terminale journal.")
     migration = state["component_migration"]
     details = {"plan_sha256": plan_sha,
-               "final_inventory_sha256": final_digest, "backup_sha256": backup_digest,
+               "final_inventory_sha256": state["inventory_sha256"],
+               "final_records_sha256": final_records_digest,
+               "backup_sha256": backup_digest,
                "new_state_sha256": state["state_sha256"],
                "operation_kind": "mu-plugin-migration", "target": TARGET,
                "source_commit_sha": SOURCE_COMMIT, "old_sha256": OLD_SHA,
@@ -321,7 +330,7 @@ def _commit(workspace, operation_id, backup_digest, plan_sha, *, rollback_of=Non
         details["rollback_of"] = rollback_of
     terminal = "component_migrated" if migration["status"] == "installed" else "component_rolled_back"
     _journal(workspace, operation_id, terminal, details)
-    return final_digest
+    return state["inventory_sha256"]
 
 
 def _advance_recovery_journal(workspace, operation_id, details, *, through_health=False):
@@ -425,8 +434,10 @@ def simulate_migration(workspace, *, candidate, candidate_commit, backup_id, bac
         if crash_at == "after-state-update" or crash_at == "before-terminal-journal":
             raise SimulatedCrash("crash after state update")
         _commit(workspace, operation_id, backup_digest, plan_sha)
+        final_state = tx._current_state(workspace)[2]
         return {"status": "committed-fixture", "operation_id": operation_id,
-                "final_inventory_sha256": tx._records_digest(tx._current_records(workspace))}
+                "final_inventory_sha256": final_state["inventory_sha256"],
+                "final_records_sha256": tx._records_digest(tx._current_records(workspace))}
     except SimulatedCrash:
         raise
     except Exception as exc:
@@ -444,7 +455,7 @@ def simulate_migration(workspace, *, candidate, candidate_commit, backup_id, bac
 
 def _recover_migration_locked(workspace, *, official_backup_proof):
     """Completa in modo idempotente un crash solo se live/state/staging concordano."""
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     events = tx._load_fixture_journal(workspace)
     if not events or events[-1]["status"] in ("committed", "component_migrated", "component_rolled_back"):
         raise MigrationFixtureError("Nessuna migrazione interrotta recuperabile.")
@@ -527,7 +538,7 @@ def _recover_rollback_locked(workspace, op_id, operation, official_backup_proof)
 
 
 def recover_migration(workspace, *, official_backup_proof):
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     if os.name != "posix" or tx.fcntl is None:
         raise MigrationFixtureError("Recovery fixture richiede POSIX e flock.")
     locks_fd = os.open(workspace.locks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -548,12 +559,13 @@ def recover_migration(workspace, *, official_backup_proof):
 def simulate_rollback(workspace, *, transaction_id, backup_id, backup_sha256,
                       official_backup_proof, confirmation, crash_at=None):
     """Ripristina solo la fixture dal backup verificato; rifiuta drift esterno."""
-    tx._validate_workspace(workspace)
+    _validate_migration_workspace(workspace)
     if os.name != "posix" or tx.fcntl is None:
         raise MigrationFixtureError("Rollback fixture richiede POSIX e flock.")
     events = tx._load_fixture_journal(workspace)
     committed = next((event for event in reversed(events)
-                      if event["operation_id"] == transaction_id and event["status"] == "committed"), None)
+                      if event["operation_id"] == transaction_id
+                      and event["status"] == "component_migrated"), None)
     if committed is None:
         raise MigrationFixtureError("Migrazione originale non risulta conclusa nel journal.")
     if (backup_id != BACKUP_ID or backup_sha256 != committed["details"].get("backup_sha256")
@@ -562,15 +574,21 @@ def simulate_rollback(workspace, *, transaction_id, backup_id, backup_sha256,
     if (not isinstance(official_backup_proof, dict)
             or official_backup_proof.get("manifest_sha256") != BACKUP_MANIFEST_SHA):
         raise MigrationFixtureError("Attestazione backup ufficiale non valida.")
+    current = tx._current_state(workspace)[2]
+    try:
+        state_tool.validate_component_migration_journal(current, events)
+    except state_tool.ReleaseStateError as exc:
+        raise MigrationFixtureError(f"Journal migration/current-release non coerenti: {exc}") from exc
+    active_migration = current.get("component_migration")
+    if (not active_migration or active_migration.get("operation_id") != transaction_id
+            or active_migration.get("status") != "installed"):
+        raise MigrationFixtureError("current-release non riconosce la migrazione richiesta come attiva.")
     backup_records, backup_data, digest = tx._load_verified_backup(workspace, backup_id, backup_sha256)
     current_records = tx._current_records(workspace)
-    if tx._records_digest(current_records) != committed["details"].get("final_inventory_sha256"):
+    if tx._records_digest(current_records) != committed["details"].get("final_records_sha256"):
         raise MigrationFixtureError("Drift dopo migrazione: rollback bloccato senza sovrascrivere modifiche esterne.")
     if backup_records.get(TARGET, {}).get("sha256") != OLD_SHA:
         raise MigrationFixtureError("Backup non contiene il MU-plugin originale.")
-    current = tx._current_state(workspace)[2]
-    if current.get("component_migration", {}).get("status") != "installed":
-        raise MigrationFixtureError("current-release non registra la migrazione installata.")
     op_id = "mu-rollback-" + uuid.uuid4().hex
     plan_sha = state_tool.digest_json({"rollback_of": transaction_id, "backup_sha256": digest,
                                        "state_sha256": current["state_sha256"]})
@@ -585,13 +603,17 @@ def simulate_rollback(workspace, *, transaction_id, backup_id, backup_sha256,
         locked_state = tx._current_state(workspace)[2]
         locked_records = tx._current_records(workspace)
         if (locked_state.get("state_sha256") != current.get("state_sha256")
-                or tx._records_digest(locked_records) != committed["details"].get("final_inventory_sha256")):
+                or tx._records_digest(locked_records) != committed["details"].get("final_records_sha256")):
             raise MigrationFixtureError("Stato o file live cambiati durante l'acquisizione del lock.")
         locked_events = tx._load_fixture_journal(workspace)
         try:
             state_tool.unresolved_operation(locked_events, allow_fixture_committed=True)
         except state_tool.ReleaseStateError as exc:
             raise MigrationFixtureError(f"Journal cambiato o operazione concorrente incompleta: {exc}") from exc
+        try:
+            state_tool.validate_component_migration_journal(locked_state, locked_events)
+        except state_tool.ReleaseStateError as exc:
+            raise MigrationFixtureError(f"Journal locked migration/current-release non coerenti: {exc}") from exc
         still_committed = next((event for event in reversed(locked_events)
                                 if event["operation_id"] == transaction_id
                                 and event["status"] == "component_migrated"), None)

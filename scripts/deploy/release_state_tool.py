@@ -393,6 +393,7 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("baseline_sha256", "")))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("new_state_sha256", "")))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("final_inventory_sha256", "")))
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("final_records_sha256", "")))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("backup_sha256", "")))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(details.get("plan_sha256", "")))
                     or status == "component_rolled_back" and not OPERATION_ID_RE.fullmatch(str(details.get("rollback_of", "")))
@@ -526,6 +527,7 @@ def validate_component_migration_journal(state, events):
     backup_event = operation[1]["details"]
     files_event = operation[3]["details"]
     expected_current = MU_MIGRATION_NEW_SHA256 if migration["status"] == "installed" else MU_MIGRATION_OLD_SHA256
+    expected_records_sha256 = digest_json(sorted(state["reference_files"], key=lambda row: row["path"]))
     if (prepared.get("operation_kind") != ("mu-plugin-migration" if migration["status"] == "installed"
                                              else "mu-plugin-rollback")
             or prepared.get("target") != MU_MIGRATION_TARGET
@@ -541,6 +543,7 @@ def validate_component_migration_journal(state, events):
             or details.get("backup_sha256") != prepared.get("backup_sha256")
             or details.get("new_state_sha256") != state.get("state_sha256")
             or details.get("final_inventory_sha256") != state.get("inventory_sha256")
+            or details.get("final_records_sha256") != expected_records_sha256
             or details.get("baseline_sha256") != migration.get("baseline_sha256")
             or details.get("current_sha256") != expected_current
             or details.get("backup_manifest_sha256") != migration.get("backup_manifest_sha256")
