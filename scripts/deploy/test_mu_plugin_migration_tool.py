@@ -19,13 +19,11 @@ import test_backup_tool as backup_fixture_module
 
 
 class MuPluginMigrationTests(unittest.TestCase):
-    def make_dedicated_backup_fixture(self):
+    def make_official_backup_fixture(self):
         fixture = backup_fixture_module.BackupToolTests("test_01_backup_valido_e_verificabile")
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
         created = fixture.create()
-        os.rename(fixture.backups / created["backup_id"],
-                  fixture.backups / migration.BACKUP_DIRECTORY_NAME)
         return fixture, created, __import__("hashlib").sha256(b"mu bytes").hexdigest()
 
     def mock_git_for_source(self, source):
@@ -109,7 +107,7 @@ class MuPluginMigrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
     def test_backup_ufficiale_verifica_e_attesta_senza_sovrascrittura(self):
-        fixture, created, old_sha = self.make_dedicated_backup_fixture()
+        fixture, created, old_sha = self.make_official_backup_fixture()
         with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
                 mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \
                 mock.patch.object(migration, "OFFICIAL_BACKUP_MANIFEST_SHA256", created["manifest_sha256"]), \
@@ -136,7 +134,7 @@ class MuPluginMigrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "Verifica backup con dir_fd richiede CI POSIX.")
     def test_attestazione_rifiuta_digest_esterno_errato_senza_scrivere(self):
-        fixture, created, old_sha = self.make_dedicated_backup_fixture()
+        fixture, created, old_sha = self.make_official_backup_fixture()
         with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
                 mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \
                 mock.patch.object(migration, "OFFICIAL_BACKUP_MANIFEST_SHA256", "0" * 64), \
@@ -151,13 +149,13 @@ class MuPluginMigrationTests(unittest.TestCase):
     def test_attestazione_rifiuta_backup_mancante_o_archivio_alterato(self):
         for alter_archive in (False, True):
             with self.subTest(alter_archive=alter_archive):
-                fixture, created, old_sha = self.make_dedicated_backup_fixture()
+                fixture, created, old_sha = self.make_official_backup_fixture()
                 if alter_archive:
-                    archive = (fixture.backups / migration.BACKUP_DIRECTORY_NAME /
+                    archive = (fixture.backups / created["backup_id"] /
                                backup_fixture_module.backup_tool.BACKUP_ARCHIVE)
                     archive.write_bytes(archive.read_bytes() + b"tamper")
                 else:
-                    (fixture.backups / migration.BACKUP_DIRECTORY_NAME).rename(
+                    (fixture.backups / created["backup_id"]).rename(
                         fixture.backups / "held-away-from-fixed-path")
                 with mock.patch.object(migration, "BASELINE_SHA256", fixture.baseline_sha), \
                         mock.patch.object(migration, "OLD_MU_PLUGIN_SHA256", old_sha), \

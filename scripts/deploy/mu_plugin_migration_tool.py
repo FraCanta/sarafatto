@@ -168,11 +168,11 @@ def _fixed_backup_attestation(private_root, expected_root, *, private=None, lock
             if baseline_digest != BASELINE_SHA256:
                 raise MigrationBlocked("Baseline privata diversa dalla baseline autorizzata.")
             backup_fd = backup_tool.open_directory_at(
-                private["backups_fd"], BACKUP_DIRECTORY_NAME, "backup MU-plugin dedicato")
+                private["backups_fd"], BACKUP_DIRECTORY_NAME, "backup applicativo ufficiale")
             raw = backup_tool.open_at_regular_bytes(
-                backup_fd, "manifest.json", "Manifest backup", 0o600,
+                backup_fd, "manifest.json", "Manifest backup ufficiale", 0o600,
                 backup_tool.MAX_MANIFEST_BYTES)
-            manifest = backup_tool.read_json_no_duplicates(raw, "manifest backup dedicato")
+            manifest = backup_tool.read_json_no_duplicates(raw, "manifest backup ufficiale")
             backup_id = manifest.get("backup_id")
             backup_tool.validate_id(backup_id)
             if backup_id != OFFICIAL_BACKUP_ID:
