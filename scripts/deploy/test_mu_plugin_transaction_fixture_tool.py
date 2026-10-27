@@ -144,6 +144,40 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
         args.update(overrides)
         return migration.simulate_migration(self.workspace, **args)
 
+    def test_00_staging_accetta_solo_file_interni_nel_descriptor_privato(self):
+        operation_id = "mu-migrate-" + "1" * 32
+        stage = migration._stage(self.workspace, operation_id, self.candidate, self.old, "644")
+        self.assertEqual(migration._read_staged(self.workspace, operation_id, "candidate.php"),
+                         self.candidate)
+        self.assertEqual(migration._read_staged(self.workspace, operation_id, "original.php"), self.old)
+        stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in ("../candidate.php", "baseline.json", "current-release.json", "other.php"):
+                with self.subTest(name=name), self.assertRaises(migration.MigrationFixtureError):
+                    migration._write_stage_file_at(stage_fd, name, b"not allowed", 0o600)
+        finally:
+            os.close(stage_fd)
+        public_fd = os.open(self.workspace.public_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with self.assertRaises(tx.TransactionError):
+                tx._write_new_at(public_fd, "candidate.php", self.candidate, 0o644)
+        finally:
+            os.close(public_fd)
+
+    def test_00a_staging_rifiuta_symlink_e_hardlink(self):
+        operation_id = "mu-migrate-" + "2" * 32
+        stage = migration._stage(self.workspace, operation_id, self.candidate, self.old, "644")
+        candidate = stage / "candidate.php"
+        original = stage / "original.php"
+        candidate.unlink()
+        candidate.symlink_to(original)
+        with self.assertRaises(migration.MigrationFixtureError):
+            migration._read_staged(self.workspace, operation_id, "candidate.php")
+        candidate.unlink()
+        os.link(original, candidate)
+        with self.assertRaises(migration.MigrationFixtureError):
+            migration._read_staged(self.workspace, operation_id, "candidate.php")
+
     def test_01_migrazione_aggiorna_solo_mu_e_current_release(self):
         before = tx._current_records(self.workspace)
         baseline_before = (self.workspace.state_dir / "baseline.json").read_bytes()

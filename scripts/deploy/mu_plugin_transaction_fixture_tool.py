@@ -24,6 +24,8 @@ NEW_SHA = state_tool.MU_MIGRATION_NEW_SHA256
 BACKUP_ID = state_tool.MU_MIGRATION_BACKUP_ID
 BACKUP_MANIFEST_SHA = state_tool.MU_MIGRATION_BACKUP_MANIFEST_SHA256
 TOKEN = object()
+STAGE_FILE_NAMES = ("candidate.php", "original.php")
+MIGRATION_OPERATION_ID_RE = re.compile(r"mu-migrate-[a-f0-9]{32}")
 
 
 class MigrationFixtureError(Exception):
@@ -176,6 +178,17 @@ def _verify_inputs(workspace, candidate, candidate_commit, backup_id, backup_sha
 
 
 def _stage(workspace, operation_id, candidate, original, mode):
+    tx._validate_workspace(workspace)
+    if not isinstance(operation_id, str) or not MIGRATION_OPERATION_ID_RE.fullmatch(operation_id):
+        raise MigrationFixtureError("ID operazione staging non valido.")
+    if not isinstance(candidate, bytes) or not isinstance(original, bytes):
+        raise MigrationFixtureError("Contenuti staging non validi.")
+    try:
+        mode_bits = int(mode, 8) if isinstance(mode, str) and re.fullmatch(r"[0-7]{3,4}", mode) else mode
+    except ValueError as exc:
+        raise MigrationFixtureError("Permessi staging non validi.") from exc
+    if not isinstance(mode_bits, int) or mode_bits < 0 or mode_bits & ~0o777:
+        raise MigrationFixtureError("Permessi staging non validi.")
     stage = workspace.staging_dir / ("mu-migration-" + operation_id)
     staging_fd = os.open(workspace.staging_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -189,8 +202,8 @@ def _stage(workspace, operation_id, candidate, original, mode):
             public_fd = os.open(workspace.public_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             if os.fstat(stage_fd).st_dev != os.fstat(public_fd).st_dev:
                 raise MigrationFixtureError("Staging e target non condividono filesystem.")
-            tx._write_new_at(stage_fd, "candidate.php", candidate, int(mode, 8))
-            tx._write_new_at(stage_fd, "original.php", original, int(mode, 8))
+            _write_stage_file_at(stage_fd, "candidate.php", candidate, mode_bits)
+            _write_stage_file_at(stage_fd, "original.php", original, mode_bits)
             os.fsync(stage_fd)
         finally:
             if public_fd is not None:
@@ -201,9 +214,51 @@ def _stage(workspace, operation_id, candidate, original, mode):
     return stage
 
 
+def _safe_stage_name(name):
+    if name not in STAGE_FILE_NAMES:
+        raise MigrationFixtureError("Nome file staging non autorizzato.")
+    return name
+
+
+def _safe_stage_relative(path):
+    return _safe_stage_name(path)
+
+
+def _write_stage_file_at(stage_fd, name, data, mode):
+    """Crea uno dei due file temporanei ammessi, solo nel descriptor dello staging."""
+    name = _safe_stage_name(name)
+    if not isinstance(data, bytes) or not isinstance(mode, int) or mode < 0 or mode & ~0o777:
+        raise MigrationFixtureError("Contenuto o permessi file staging non validi.")
+    directory_info = os.fstat(stage_fd)
+    if not stat.S_ISDIR(directory_info.st_mode):
+        raise MigrationFixtureError("Descriptor staging non riferito a una directory.")
+    fd = None
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     mode, dir_fd=stage_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise MigrationFixtureError("File staging speciale o hard link sospetto.")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise MigrationFixtureError("Scrittura staging incompleta.")
+            view = view[written:]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.fsync(stage_fd)
+    except OSError as exc:
+        raise MigrationFixtureError(f"Creazione file staging non riuscita: {name}.") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _read_staged(workspace, operation_id, name):
-    if name not in ("candidate.php", "original.php"):
-        raise MigrationFixtureError("Nome staging non autorizzato.")
+    _safe_stage_name(name)
+    if not isinstance(operation_id, str) or not MIGRATION_OPERATION_ID_RE.fullmatch(operation_id):
+        raise MigrationFixtureError("ID operazione staging non valido.")
     stage = workspace.staging_dir / ("mu-migration-" + operation_id)
     if stage.parent != workspace.staging_dir:
         raise MigrationFixtureError("Percorso staging fuori allowlist.")
@@ -211,7 +266,7 @@ def _read_staged(workspace, operation_id, name):
     try:
         stage_fd = os.open(stage.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=staging_fd)
         try:
-            raw, _ = tx._read_at(stage_fd, name, 1024 * 1024)
+            raw, _ = tx._read_at(stage_fd, name, 1024 * 1024, validator=_safe_stage_relative)
             return raw
         finally:
             os.close(stage_fd)
