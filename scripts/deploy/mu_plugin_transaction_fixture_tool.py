@@ -583,7 +583,11 @@ def simulate_rollback(workspace, *, transaction_id, backup_id, backup_sha256,
     if (not active_migration or active_migration.get("operation_id") != transaction_id
             or active_migration.get("status") != "installed"):
         raise MigrationFixtureError("current-release non riconosce la migrazione richiesta come attiva.")
-    backup_records, backup_data, digest = tx._load_verified_backup(workspace, backup_id, backup_sha256)
+    try:
+        backup_records, backup_data, digest = tx._load_verified_backup(
+            workspace, backup_id, backup_sha256)
+    except tx.TransactionError as exc:
+        raise MigrationFixtureError(f"Backup rollback non verificabile: {exc}") from exc
     current_records = tx._current_records(workspace)
     if tx._records_digest(current_records) != committed["details"].get("final_records_sha256"):
         raise MigrationFixtureError("Drift dopo migrazione: rollback bloccato senza sovrascrivere modifiche esterne.")

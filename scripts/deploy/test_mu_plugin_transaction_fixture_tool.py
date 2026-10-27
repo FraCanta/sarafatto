@@ -375,6 +375,10 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
     def test_09b_backup_alterato_blocca_rollback(self):
         published = self.run_migration()
         backup_file = self.workspace.backups_dir / migration.BACKUP_ID / "backup.json"
+        current_state_file = self.workspace.state_dir / tx.release_state.STATE_NAME
+        state_before = current_state_file.read_bytes()
+        events_before = tx._load_fixture_journal(self.workspace)
+        target = self.workspace.public_root / self.target
         backup_file.write_bytes(backup_file.read_bytes() + b"tampered")
         with self.assertRaises(migration.MigrationFixtureError):
             migration.simulate_rollback(
@@ -383,7 +387,12 @@ class MuPluginTransactionFixtureTests(unittest.TestCase):
                 official_backup_proof=self.proof,
                 confirmation=f"ROLLBACK-MU-FIXTURE {published['operation_id']} {self.backup['backup_sha256']}",
             )
-        self.assertEqual(sha((self.workspace.public_root / self.target).read_bytes()), migration.NEW_SHA)
+        self.assertEqual(sha(target.read_bytes()), migration.NEW_SHA)
+        self.assertEqual(current_state_file.read_bytes(), state_before)
+        events_after = tx._load_fixture_journal(self.workspace)
+        self.assertEqual(events_after, events_before)
+        self.assertEqual(events_after[-1]["status"], "component_migrated")
+        self.assertFalse(any(event["status"] == "component_rolled_back" for event in events_after))
 
     def test_10_rollback_interrotto_dopo_rename_recuperabile(self):
         published = self.run_migration()
