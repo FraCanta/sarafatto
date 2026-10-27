@@ -20,6 +20,11 @@ on:
         required: true
         default: false
         type: boolean
+      stage_private_artifact:
+        description: Trasferisce e verifica l'artefatto soltanto nell'area privata IONOS (richiede Environment protetto)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -55,13 +60,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py", "scripts/deploy/production_adapter.py", "scripts/deploy/test_production_adapter.py", "scripts/deploy/production_publisher.py", "scripts/deploy/test_production_publisher.py", "scripts/deploy/ionos_release_barrier_probe.py", "scripts/deploy/test_ionos_release_barrier_probe.py", "scripts/deploy/http_php_release_probe.py", "scripts/deploy/test_http_php_release_probe.py", "scripts/deploy/request_barrier_tool.py", "scripts/deploy/test_request_barrier_tool.py", "scripts/deploy/mu_plugin_migration_tool.py", "scripts/deploy/test_mu_plugin_migration_tool.py", "scripts/deploy/mu_plugin_transaction_fixture_tool.py", "scripts/deploy/test_mu_plugin_transaction_fixture_tool.py")]'
+          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding="utf-8")) for p in ("scripts/deploy/preview-report.py", "scripts/deploy/baseline_tool.py", "scripts/deploy/test_baseline_tool.py", "scripts/deploy/backup_tool.py", "scripts/deploy/test_backup_tool.py", "scripts/deploy/release_state_tool.py", "scripts/deploy/test_release_state_tool.py", "scripts/deploy/transaction_fixture_tool.py", "scripts/deploy/test_transaction_fixture_tool.py", "scripts/deploy/production_adapter.py", "scripts/deploy/test_production_adapter.py", "scripts/deploy/production_publisher.py", "scripts/deploy/test_production_publisher.py", "scripts/deploy/artifact_transfer_tool.py", "scripts/deploy/test_artifact_transfer_tool.py", "scripts/deploy/ionos_release_barrier_probe.py", "scripts/deploy/test_ionos_release_barrier_probe.py", "scripts/deploy/http_php_release_probe.py", "scripts/deploy/test_http_php_release_probe.py", "scripts/deploy/request_barrier_tool.py", "scripts/deploy/test_request_barrier_tool.py", "scripts/deploy/mu_plugin_migration_tool.py", "scripts/deploy/test_mu_plugin_migration_tool.py", "scripts/deploy/mu_plugin_transaction_fixture_tool.py", "scripts/deploy/test_mu_plugin_transaction_fixture_tool.py")]'
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_baseline_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_backup_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_release_state_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_transaction_fixture_tool.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_publisher.py
+          SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_artifact_transfer_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_http_php_release_probe.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_ionos_release_barrier_probe.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_request_barrier_tool.py
@@ -252,3 +258,118 @@ jobs:
             -o ConnectTimeout=15 \
             "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
             "cd /home/www/sarafatto-repo && GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/production_adapter.py inspect --authorized-sha '$RELEASE_SHA'"
+
+  stage-private-artifact:
+    needs: [validate, build-artifact]
+    if: github.event_name == 'workflow_dispatch' && inputs.stage_private_artifact == true && vars.IONOS_PRIVATE_STAGING_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: ionos-private-staging
+    steps:
+      - name: Verifica branch e SHA esatto
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ && "$RELEASE_SHA" == "$GITHUB_SHA" ]]
+      - name: Checkout strumenti del commit autorizzato
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+      - name: Scarica artifact dello stesso run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sarafatto-release-${{ github.sha }}
+          path: ${{ runner.temp }}/sarafatto-transfer
+      - name: Verifica package, archivio e provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/deploy/verify-vite-manifest.mjs \
+            --package "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release" \
+            --inventory "$RUNNER_TEMP/sarafatto-transfer/reverified-inventory.tsv" \
+            --release-sha "$GITHUB_SHA"
+          cmp "$RUNNER_TEMP/sarafatto-transfer/sarafatto-inventory.tsv" \
+              "$RUNNER_TEMP/sarafatto-transfer/reverified-inventory.tsv"
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/production_publisher.py verify-artifact \
+            --release-sha "$GITHUB_SHA" \
+            --package "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release" \
+            --inventory "$RUNNER_TEMP/sarafatto-transfer/sarafatto-inventory.tsv" \
+            --provenance "$RUNNER_TEMP/sarafatto-transfer/sarafatto-provenance.json" \
+            --archive "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release.tar.gz" \
+            --run-id "$GITHUB_RUN_ID"
+      - name: Installa credenziali SSH effimere
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 "$RUNNER_TEMP/sarafatto-transfer-ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/sarafatto-transfer-ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/sarafatto-transfer-ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/sarafatto-transfer-ssh/id_ed25519" "$RUNNER_TEMP/sarafatto-transfer-ssh/known_hosts"
+      - name: Prenota una directory privata non riutilizzabile
+        id: reserve
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          SSH_KEY_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/id_ed25519
+          SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/known_hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IONOS_SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$IONOS_SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$IONOS_SSH_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( IONOS_SSH_PORT >= 1 && IONOS_SSH_PORT <= 65535 ))
+          transfer_id="run-${GITHUB_RUN_ID}-${GITHUB_SHA:0:12}"
+          archive_sha256="$(sha256sum "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release.tar.gz" | cut -d ' ' -f 1)"
+          inventory_sha256="$(sha256sum "$RUNNER_TEMP/sarafatto-transfer/sarafatto-inventory.tsv" | cut -d ' ' -f 1)"
+          ssh -T -p "$IONOS_SSH_PORT" -i "$SSH_KEY_FILE" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
+            "cd /home/www/sarafatto-repo && PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/artifact_transfer_tool.py reserve --transfer-id '$transfer_id' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --archive-sha256 '$archive_sha256' --inventory-sha256 '$inventory_sha256'"
+          echo "transfer_id=$transfer_id" >> "$GITHUB_OUTPUT"
+          echo "remote_dir=/home/www/sarafatto-deploy/staging/incoming/$transfer_id" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+      - name: Trasferisce soltanto nell'area privata prenotata
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          SSH_KEY_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/id_ed25519
+          SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/known_hosts
+          REMOTE_DIR: ${{ steps.reserve.outputs.remote_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -P "$IONOS_SSH_PORT" -i "$SSH_KEY_FILE" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
+            "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release.tar.gz" \
+            "$RUNNER_TEMP/sarafatto-transfer/sarafatto-inventory.tsv" \
+            "$RUNNER_TEMP/sarafatto-transfer/sarafatto-provenance.json" \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST:$REMOTE_DIR/"
+      - name: Verifica sul server e chiude il trasferimento privato
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          SSH_KEY_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/id_ed25519
+          SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/sarafatto-transfer-ssh/known_hosts
+          TRANSFER_ID: ${{ steps.reserve.outputs.transfer_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -T -p "$IONOS_SSH_PORT" -i "$SSH_KEY_FILE" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
+            "cd /home/www/sarafatto-repo && PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/artifact_transfer_tool.py verify --transfer-id '$TRANSFER_ID' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID'"

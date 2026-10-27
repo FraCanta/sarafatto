@@ -479,8 +479,10 @@ controllo offline. `preflight` confronta release, repository IONOS, stato
 corrente e inventario live; accetta input soltanto sotto l'area privata
 `/home/www/sarafatto-deploy/staging`. Il comando `backup` può creare un backup
 fresco esclusivamente nell'area privata, con conferma esplicita e verifica
-della quota. `publish`, `rollback` e `recover` sono ancora bloccati: non esiste
-un writer transazionale di produzione collaudato.
+della quota. `publish`, `rollback` e `recover` sono ancora bloccati: current-release
+e journal accettano al momento soltanto bootstrap iniziale e delta MU-plugin, e
+gli strumenti backup rifiutano una release applicativa successiva. Non esiste
+ancora un writer transazionale di produzione collaudato.
 
 Comandi di sola lettura, da eseguire sul server solo durante il collaudo
 autorizzato:
@@ -491,19 +493,33 @@ SHA='<40 caratteri esadecimali del commit autorizzato>'
 python3 scripts/deploy/production_publisher.py status --authorized-sha "$SHA"
 python3 scripts/deploy/production_publisher.py preflight \
   --release-sha "$SHA" \
-  --package /home/www/sarafatto-deploy/staging/incoming/sarafatto-release \
-  --inventory /home/www/sarafatto-deploy/staging/incoming/sarafatto-inventory.tsv \
-  --provenance /home/www/sarafatto-deploy/staging/incoming/sarafatto-provenance.json \
-  --archive /home/www/sarafatto-deploy/staging/incoming/sarafatto-release.tar.gz \
+  --package /home/www/sarafatto-deploy/staging/incoming/run-<run-id>-<sha12>/package \
+  --inventory /home/www/sarafatto-deploy/staging/incoming/run-<run-id>-<sha12>/inventory.tsv \
+  --provenance /home/www/sarafatto-deploy/staging/incoming/run-<run-id>-<sha12>/sarafatto-provenance.json \
+  --archive /home/www/sarafatto-deploy/staging/incoming/run-<run-id>-<sha12>/sarafatto-release.tar.gz \
   --run-id '<ID del run GitHub verificato>'
 ```
 
 `preflight` è read-only e richiede che i file siano già presenti nell'area
-privata. Il workflow attuale non li trasferisce su IONOS: nessun job SSH di
-pubblicazione o trasferimento è abilitato. Lo SHA/run ID devono essere verificati
-rispetto alla pagina del workflow e all'artefatto scaricato. L'esito resta
-bloccato finché non esistono il writer transazionale e prove fresche della
-barriera PHP web e del comportamento OPcache uniforme.
+privata. Il workflow include il job manuale `stage-private-artifact`, attivabile
+solo con l'input `stage_private_artifact=true`, la variabile repository
+`IONOS_PRIVATE_STAGING_ENABLED=true`, i Secrets SSH e l'Environment GitHub
+`ionos-private-staging`. Configurare l'Environment con revisori obbligatori prima
+di valorizzare la variabile. Il job verifica la host key, prenota una directory
+non riutilizzabile, trasferisce archivio/inventario/provenance via `scp` e lancia
+`artifact_transfer_tool.py verify`. Il server verifica commit, run ID, digest,
+contenuto e manifest, poi crea `TRANSFER_COMPLETE` per ultimo. Replay, file extra
+e trasferimenti parziali bloccano la verifica; non avviene cleanup automatico.
+La provenance non è una firma. Il job non esegue preflight, publish, rollback o
+recovery e non scrive nella webroot.
+
+Per il collaudo manuale, avviare il dispatch sulla stessa SHA di `main`, abilitare
+solo `stage_private_artifact` e attendere l'approvazione dell'Environment. Il
+package verificato sarà in
+`/home/www/sarafatto-deploy/staging/incoming/run-<run-id>-<sha12>/package`;
+inventario, archive e provenance restano nella stessa directory privata. Un run
+incompleto non si riusa: va ispezionato e classificato manualmente, senza cleanup
+automatico.
 
 Creazione di un backup (scrive soltanto nell'area privata; non è un deploy):
 
@@ -529,8 +545,9 @@ python3 scripts/deploy/production_publisher.py recover --operation-id '<id>'
 ```
 
 Non impostare gate o Secrets per tentare di attivare la pubblicazione: il
-workflow non contiene un job di scrittura e il CLI rifiuta `publish`, `rollback`
-e `recover`. Prima dell'implementazione di tali transazioni servono almeno:
+workflow non contiene un job di scrittura pubblica e il CLI rifiuta `publish`,
+`rollback` e `recover`. Il job di staging scrive esclusivamente sotto la root
+privata dedicata. Prima dell'implementazione delle transazioni pubbliche servono almeno:
 
 1. Prova HTTP/PHP fresca che dimostri lock condiviso per tutta la richiesta,
    marker di manutenzione e rifiuto delle nuove richieste.
@@ -541,8 +558,13 @@ e `recover`. Prima dell'implementazione di tali transazioni servono almeno:
 4. Implementazione e test Linux del journal/state writer, della transazione
    pubblica, dell'health check e del rollback, senza usare le fixture come
    publisher.
-5. Trasferimento autenticato dell'artefatto in area privata con digest verificato
-   da un dato indipendente del run GitHub.
+5. Revisione indipendente della provenance e configurazione verificata dei
+   revisori dell'Environment `ionos-private-staging`.
+6. Writer transazionale per release successive, rollback e recovery coerenti con
+   current-release/journal e backup freschi.
+7. Prova reale su PHP web IONOS della barriera, del drain e del comportamento
+   OPcache prima di qualsiasi scrittura pubblica.
 
-Fino ad allora i push su `main` eseguono CI e build dell'artefatto; non viene
-effettuata alcuna connessione SSH automatica né alcuna modifica a WordPress.
+Fino ad allora i push su `main` eseguono CI e build dell'artefatto. Il trasferimento
+privato è manuale e richiede l'Environment protetto; non è configurato deploy
+automatico e nessun job modifica WordPress pubblico.

@@ -34,6 +34,7 @@ SOURCE_FILES = (
     "scripts/deploy/release_state_tool.py",
     "scripts/deploy/baseline-inventory.sh",
     "scripts/deploy/production_publisher.py",
+    "scripts/deploy/artifact_transfer_tool.py",
     "scripts/deploy/request_barrier_tool.py",
     "scripts/deploy/mu_plugin_migration_tool.py",
 )
