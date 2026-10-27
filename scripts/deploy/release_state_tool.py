@@ -448,7 +448,9 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
     if not OPERATION_ID_RE.fullmatch(str(operation_id)) or status not in OPERATION_STATES:
         raise ReleaseStateError("ID o stato operazione non validi.")
     if status in ("committed", "component_migrated", "component_rolled_back"):
-        raise ReleaseStateError("La conferma terminale richiede il verificatore specifico della transazione.")
+        raise ReleaseStateError(
+            "La conferma terminale richiede il verificatore di deploy specifico della transazione."
+        )
     if not isinstance(details, dict):
         raise ReleaseStateError("Dettagli evento non validi.")
     if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
