@@ -415,7 +415,8 @@ def plan_inventory_changes(candidate, live, reference):
 
 
 def make_release_state_plan(current_state, artifact_records, operation_id, *,
-                            approved_removals=(), removal_approval=None):
+                            approved_removals=(), removal_approval=None,
+                            operation_kind="publish", rollback_target_release_id=None):
     """Crea il piano schema-release senza scrivere né autorizzare rimozioni.
 
     I file extra registrati nello stato corrente vengono mantenuti nello snapshot
@@ -445,7 +446,8 @@ def make_release_state_plan(current_state, artifact_records, operation_id, *,
             candidate_rows[path] = dict(row)
     ordered_rows = [candidate_rows[path] for path in sorted(candidate_rows)]
     plan, digest = release_state_tool.make_application_release_plan(
-        current_state, ordered_rows, operation_id, approved_removals=approved_removals,
+        current_state, ordered_rows, operation_id, operation_kind=operation_kind,
+        approved_removals=approved_removals, rollback_target_release_id=rollback_target_release_id,
         removal_approval=removal_approval)
     return {"operation_id": operation_id, "plan": plan, "plan_sha256": digest,
             "candidate_reference_files": ordered_rows}
@@ -868,6 +870,639 @@ def publish_filesystem_snapshot(source_root, target_root, current_rows, candidat
         except Exception as rollback_exc:
             raise PublisherError(f"Health check fallito e rollback automatico non verificato: {rollback_exc}") from exc
         raise PublisherError(f"Health check fallito; rollback al parent completato e verificato: {exc}") from exc
+
+
+TRANSACTION_MANIFEST_LIMIT = 32 * 1024 * 1024
+
+
+def _transaction_directory(staging_fd, *, create=False):
+    name = "transactions"
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=staging_fd)
+            os.fsync(staging_fd)
+        except FileExistsError:
+            pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=staging_fd)
+    info = os.fstat(fd)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        os.close(fd)
+        raise PublisherError("Directory privata transactions non sicura.")
+    return fd
+
+
+def _write_private_file_at(parent_fd, name, payload):
+    if (not re.fullmatch(r"[A-Za-z0-9._-]{1,140}", name)
+            or not isinstance(payload, bytes) or len(payload) > TRANSACTION_MANIFEST_LIMIT):
+        raise PublisherError("File transazione privato non valido o oltre limite.")
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=parent_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0:
+                raise PublisherError("Scrittura del file transazione incompleta.")
+            view = view[count:]
+        os.fsync(fd)
+        return hashlib.sha256(payload).hexdigest()
+    finally:
+        os.close(fd)
+        os.fsync(parent_fd)
+
+
+def _read_private_file_at(parent_fd, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size > TRANSACTION_MANIFEST_LIMIT):
+            raise PublisherError("File transazione privato non regolare o non sicuro.")
+        chunks = []
+        total = 0
+        while True:
+            block = os.read(fd, min(1024 * 1024, TRANSACTION_MANIFEST_LIMIT + 1 - total))
+            if not block:
+                break
+            total += len(block)
+            if total > TRANSACTION_MANIFEST_LIMIT:
+                raise PublisherError("File transazione privato oltre limite.")
+            chunks.append(block)
+        after = os.fstat(fd)
+        if (total != before.st_size or after.st_size != before.st_size
+                or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns):
+            raise PublisherError("File transazione cambiato durante la lettura.")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _health_evidence(health_check):
+    try:
+        result = health_check()
+    except Exception as exc:
+        raise PublisherError(f"Health check non eseguibile: {exc}") from exc
+    if not isinstance(result, dict) or result.get("status") != "healthy":
+        raise PublisherError("Health check post-operazione non superato.")
+    digest = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"),
+                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+    return result, digest
+
+
+def _verify_fresh_snapshot(inventory_reader, tool_commit, reference_files, exclusion,
+                           expected_digest):
+    expected = {row["path"]: row for row in reference_files}
+    first_text, second_text = inventory_reader(tool_commit), inventory_reader(tool_commit)
+    try:
+        first = release_state_tool._validate_inventory(first_text, expected)
+        second = release_state_tool._validate_inventory(second_text, expected)
+    except release_state_tool.ReleaseStateError as exc:
+        raise PublisherError(f"Inventario fresco non valido: {exc}") from exc
+    first_digest = release_state_tool.inventory_digest_json(first)
+    second_digest = release_state_tool.inventory_digest_json(second)
+    if first_digest != second_digest or second_digest != expected_digest:
+        raise PublisherError("I due inventari freschi non coincidono con lo snapshot atteso.")
+    if second.get("exclusion") != exclusion:
+        raise PublisherError("Conteggi delle esclusioni non coerenti con lo stato release.")
+    return second
+
+
+def _backup_release_reference(current_state, backup_result):
+    return {
+        "backup_id": backup_result["backup_id"],
+        "manifest_sha256": backup_result["manifest_sha256"],
+        "release_id": current_state["release"]["release_id"],
+        "inventory_sha256": current_state["inventory_sha256"],
+        "baseline_sha256": current_state["initial_baseline"]["sha256"],
+    }
+
+
+def _verify_backup_for_parent(private, parent_state, backup_reference):
+    """Verifica un backup rispetto al parent noto senza richiedere journal idle.
+
+    Serve soltanto durante recovery: il journal è intenzionalmente incompleto,
+    quindi il verificatore standard rifiuterebbe correttamente lo stato attivo.
+    Qui digest esterno, archivio e file vengono confrontati direttamente con il
+    parent già validato sotto il lock esclusivo.
+    """
+    backup_fd = backup_tool.open_directory_at(
+        private["backups_fd"], backup_reference["backup_id"], "backup transazione")
+    try:
+        verified = backup_tool.verify_backup_directory(
+            None, backup_reference["backup_id"], parent_state["initial_baseline"]["sha256"],
+            backup_reference["manifest_sha256"], directory_fd=backup_fd)
+        _, baseline_sha, baseline_commit, _ = backup_tool.validate_backup_baseline(
+            None, parent_state["initial_baseline"]["sha256"], state_fd=private["state_fd"])
+        reference = verified["manifest"].get("reference_state")
+        if reference is not None and (reference.get("release_id") != parent_state["release"]["release_id"]
+                                      or reference.get("inventory_sha256") != parent_state["inventory_sha256"]
+                                      or reference.get("state_sha256") != parent_state["state_sha256"]):
+            raise PublisherError("Backup transazione non riferito al parent corrente.")
+        expected = {row["path"]: {key: row[key] for key in
+                                   ("path", "sha256", "size", "mode", "classification")}
+                    for row in parent_state["reference_files"]}
+        backup_tool.verify_manifest_matches_baseline(
+            verified["manifest"], baseline_sha, baseline_commit, expected)
+        return verified
+    finally:
+        os.close(backup_fd)
+
+
+def _run_filesystem_release_transaction(*, operation_kind, operation_id, release_id,
+                                        commit_sha, inventory_tool_commit, artifact_sha256,
+                                        source_root, candidate_rows, plan, rollback_target_release_id,
+                                        approved_removals, current_state, private, lock_fd,
+                                        private_root, public_root, expected_private_root,
+                                        expected_public_root, quota_free_bytes,
+                                        inventory_reader, health_check, rollback_health_check,
+                                        fault_hook=None):
+    state_fd, locks_fd = private["state_fd"], private["locks_fd"]
+    staging_fd, backups_fd = private["staging_fd"], private["backups_fd"]
+    baseline_sha = current_state["initial_baseline"]["sha256"]
+    parent_state_sha = current_state["state_sha256"]
+    parent_rows = current_state["reference_files"]
+    transaction_dir_fd = _transaction_directory(staging_fd, create=True)
+    restore_report = None
+    prepared_written = False
+    try:
+        backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:12]
+        backup_result = backup_tool.create_backup(
+            backup_id, baseline_sha, quota_free_bytes,
+            private_root=private_root, expected_private_root=expected_private_root,
+            public_root=public_root, baseline_path=pathlib.Path(private_root) / "state" / "baseline.json",
+            lock_fd=lock_fd, inventory_reader=inventory_reader)
+        backup_verification = backup_tool.verify_backup(
+            backup_id, baseline_sha, backup_result["manifest_sha256"],
+            private_root=private_root, expected_private_root=expected_private_root, lock_fd=lock_fd)
+        if backup_verification.get("status") != "verified":
+            raise PublisherError("Backup fresco non verificato indipendentemente.")
+        restore_report = backup_tool.restore_test(
+            backup_id, baseline_sha, backup_result["manifest_sha256"], quota_free_bytes,
+            private_root=private_root, expected_private_root=expected_private_root, lock_fd=lock_fd)
+        recovery_root = pathlib.Path(restore_report["restore_test_path"])
+        if recovery_root != pathlib.Path(private_root) / "staging" / recovery_root.relative_to(pathlib.Path(private_root) / "staging"):
+            raise PublisherError("Snapshot di recovery fuori dalla staging privata.")
+        if recovery_root.name != "restored" or not recovery_root.is_dir() or recovery_root.is_symlink():
+            raise PublisherError("Snapshot di recovery assente o non sicuro.")
+
+        backup_reference = _backup_release_reference(current_state, backup_result)
+        plan_sha = release_state_tool.digest_json(plan)
+        manifest = {
+            "schema_version": 1, "operation_id": operation_id, "operation_kind": operation_kind,
+            "release_id": release_id, "commit_sha": commit_sha,
+            "inventory_tool_commit": inventory_tool_commit, "artifact_sha256": artifact_sha256,
+            "parent_state_sha256": parent_state_sha, "parent_release_id": current_state["release"]["release_id"],
+            "parent_inventory_sha256": current_state["inventory_sha256"],
+            "backup": backup_reference, "plan": plan, "plan_sha256": plan_sha,
+            "rollback_target_release_id": rollback_target_release_id,
+            "parent_reference_files": parent_rows, "candidate_reference_files": candidate_rows,
+            "source_root": str(pathlib.Path(source_root)), "recovery_root": str(recovery_root),
+            "public_root": str(pathlib.Path(public_root)),
+            "approved_removals": list(approved_removals),
+        }
+        manifest_raw = release_state_tool.json_bytes(manifest)
+        manifest_name = f"transaction-{operation_id}.json"
+        manifest_sha = _write_private_file_at(transaction_dir_fd, manifest_name, manifest_raw)
+        entry_fields = {
+            "operation_kind": operation_kind, "release_id": release_id,
+            "commit_sha": commit_sha, "artifact_sha256": artifact_sha256,
+            "plan_sha256": plan_sha, "backup_id": backup_reference["backup_id"],
+            "backup_manifest_sha256": backup_reference["manifest_sha256"],
+            "parent_release_id": backup_reference["release_id"],
+            "parent_inventory_sha256": backup_reference["inventory_sha256"],
+            "parent_state_sha256": parent_state_sha,
+            "parent_document_sha256": parent_state_sha, "plan": plan,
+            "transaction_manifest_sha256": manifest_sha,
+        }
+        release_state_tool.append_operation_event(
+            state_fd, locks_fd, operation_id, "prepared", entry_fields, lock_fd=lock_fd)
+        prepared_written = True
+        if fault_hook:
+            fault_hook("after-prepared", operation_id, 0)
+        release_state_tool.append_operation_event(
+            state_fd, locks_fd, operation_id, "backup_verified", backup_reference, lock_fd=lock_fd)
+        release_state_tool.append_operation_event(
+            state_fd, locks_fd, operation_id, "publishing", {"plan_sha256": plan_sha}, lock_fd=lock_fd)
+        if fault_hook:
+            fault_hook("after-publishing", operation_id, 0)
+        applied = apply_file_snapshot(source_root, public_root, parent_rows, candidate_rows,
+                                      approved_removals=approved_removals, fault_hook=fault_hook)
+        _verify_fresh_snapshot(inventory_reader, inventory_tool_commit, candidate_rows,
+                               current_state["inventory"]["exclusion"],
+                               plan["candidate_inventory_sha256"])
+        release_state_tool.append_operation_event(
+            state_fd, locks_fd, operation_id, "files_verified",
+            {"final_inventory_sha256": plan["candidate_inventory_sha256"]}, lock_fd=lock_fd)
+        evidence, health_sha = _health_evidence(health_check)
+        candidate = release_state_tool.build_application_release_state(
+            current_state, release_id=release_id, commit_sha=commit_sha,
+            inventory_tool_commit=inventory_tool_commit, operation_id=operation_id,
+            operation_kind=operation_kind, artifact_sha256=artifact_sha256,
+            backup=backup_reference, reference_files=candidate_rows, plan=plan,
+            rollback_target_release_id=rollback_target_release_id,
+            health_evidence_sha256=health_sha)
+        candidate_payload = release_state_tool.json_bytes(candidate)
+        candidate_state_sha = _write_private_file_at(
+            transaction_dir_fd, f"candidate-{operation_id}.json", candidate_payload)
+        release_state_tool.append_operation_event(
+            state_fd, locks_fd, operation_id, "health_verified",
+            {"health_evidence_sha256": health_sha, "candidate_state_sha256": candidate_state_sha},
+            lock_fd=lock_fd)
+        if fault_hook:
+            fault_hook("after-health-verified", operation_id, len(applied["written"]))
+        terminal = release_state_tool.append_verified_application_terminal(
+            candidate, parent_state_sha, private_root=private_root, expected_root=expected_private_root,
+            inventory_reader=inventory_reader, lock_fd=lock_fd)
+        if fault_hook:
+            fault_hook("after-terminal", operation_id, len(applied["written"]))
+        promoted = release_state_tool.persist_verified_application_release_state(
+            candidate, parent_state_sha, private_root=private_root, expected_root=expected_private_root,
+            baseline_sha256=baseline_sha, inventory_reader=inventory_reader, lock_fd=lock_fd)
+        return {"status": "published" if operation_kind == "publish" else "rolled-back",
+                "operation_id": operation_id, "release_id": release_id,
+                "inventory_sha256": plan["candidate_inventory_sha256"],
+                "backup": backup_reference, "health_evidence": evidence,
+                "terminal": terminal, "state": promoted,
+                "files_written": applied["written"], "public_writes_performed": True,
+                "atomicity": "per-file-only; requests may observe mixed component versions"}
+    except BaseException as exc:
+        # Interruzioni di processo (BaseException) lasciano il journal riprendibile.
+        # Gli errori ordinari tentano invece immediatamente il ripristino verificato.
+        if prepared_written and isinstance(exc, Exception):
+            try:
+                release_state_tool.append_operation_event(
+                    state_fd, locks_fd, operation_id, "recovery_required",
+                    {"reason": type(exc).__name__, "message": str(exc)[:1000]}, lock_fd=lock_fd)
+                recovered = recover_file_snapshot(
+                    recovery_root, public_root, parent_rows, candidate_rows)
+                parent_health, parent_health_sha = _health_evidence(rollback_health_check or health_check)
+                release_state_tool.append_verified_recovery_completion(
+                    operation_id, parent_state_sha, backup_id=backup_reference["backup_id"],
+                    backup_manifest_sha256=backup_reference["manifest_sha256"],
+                    restored_inventory_sha256=current_state["inventory_sha256"],
+                    health_evidence_sha256=parent_health_sha,
+                    private_root=private_root, expected_root=expected_private_root,
+                    inventory_reader=inventory_reader, lock_fd=lock_fd)
+                raise PublisherError(
+                    f"Operazione fallita; rollback al parent ripristinato e verificato ({len(recovered['written'])} file)."
+                ) from exc
+            except PublisherError as recovery_error:
+                if "rollback al parent" in str(recovery_error):
+                    raise
+                raise PublisherError(f"Operazione interrotta; recovery_required, intervento necessario: {recovery_error}") from exc
+            except Exception as recovery_error:
+                raise PublisherError(f"Operazione interrotta; recovery_required, intervento necessario: {recovery_error}") from exc
+        raise
+    finally:
+        os.close(transaction_dir_fd)
+
+
+def _require_staging_path(root, path, label, *, directory=False):
+    root, path = pathlib.Path(root), pathlib.Path(path)
+    try:
+        if not root.is_absolute() or root.resolve(strict=True) != root or not path.is_absolute():
+            raise PublisherError(f"Percorso {label} non canonico o non assoluto.")
+        relative = path.relative_to(root)
+        if not relative.parts:
+            raise PublisherError(f"Percorso {label} coincide con la root staging.")
+        current = root
+        for part in relative.parts[:-1] if not directory else relative.parts:
+            current = current / part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise PublisherError(f"Componente non-directory o symlink nel percorso {label}.")
+        if not directory:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise PublisherError(f"File {label} non regolare o hard link.")
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, PublisherError):
+            raise
+        raise PublisherError(f"Percorso {label} fuori o non sicuro nella staging privata.") from exc
+
+
+def _open_release_context(private_root, expected_private_root):
+    if (pathlib.Path(private_root) != pathlib.Path(expected_private_root)
+            or not pathlib.Path(private_root).is_absolute()):
+        raise PublisherError("Root privata diversa da quella autorizzata.")
+    private = backup_tool.open_private_directories(private_root, expected_private_root)
+    try:
+        lock_fd = baseline_tool.acquire_baseline_lock(private["paths"]["locks"], private["locks_fd"])
+        return private, lock_fd
+    except Exception:
+        backup_tool.close_private_directories(private)
+        raise
+
+
+def _load_locked_release(private, baseline_sha256=None):
+    state = release_state_tool.load_current_state(private["state_fd"], baseline_sha256)
+    events = release_state_tool.read_journal_at(private["state_fd"])
+    release_state_tool.validate_current_state_journal(state, events)
+    return state, events
+
+
+def publish_filesystem_release(*, package_root, inventory_path, provenance_path, archive_path,
+                               release_sha, run_id, release_id, operation_id, quota_free_bytes,
+                               private_root, expected_private_root, public_root, expected_public_root,
+                               health_check, rollback_health_check=None, inventory_reader=None,
+                               approved_removals=(), removal_approval=None, fault_hook=None):
+    """Orchestra A→B su filesystem autorizzato; CLI IONOS resta separata e disabilitata.
+
+    `private_root == expected_private_root` e `public_root == expected_public_root`
+    sono obbligatori. I test passano directory temporanee identiche; il wrapper
+    produttivo dovrà passare esclusivamente le costanti IONOS.
+    """
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not callable(health_check):
+        raise PublisherError("Orchestrazione richiede POSIX/O_NOFOLLOW e health check.")
+    if pathlib.Path(public_root) != pathlib.Path(expected_public_root):
+        raise PublisherError("Root pubblica diversa dal target autorizzato.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", str(operation_id or "")):
+        raise PublisherError("ID operazione non valido.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", str(release_id or "")):
+        raise PublisherError("ID release non valido.")
+    if not re.fullmatch(r"[a-f0-9]{40}", str(release_sha or "")):
+        raise PublisherError("Commit SHA completo richiesto.")
+    private = lock_fd = None
+    try:
+        private, lock_fd = _open_release_context(private_root, expected_private_root)
+        staging_root = pathlib.Path(private_root) / "staging"
+        for label, path in (("package", package_root), ("inventory", inventory_path),
+                            ("provenance", provenance_path), ("archive", archive_path)):
+            _require_staging_path(staging_root, path, label, directory=(label == "package"))
+        current, events = _load_locked_release(private)
+        if any(event["operation_id"] == operation_id for event in events):
+            raise PublisherError("ID operazione già usato nel journal.")
+        baseline_doc, baseline_sha, _, _ = backup_tool.validate_backup_baseline(
+            None, current["initial_baseline"]["sha256"], state_fd=private["state_fd"])
+        if baseline_sha != current["initial_baseline"]["sha256"]:
+            raise PublisherError("Baseline storica diversa dal current-release.")
+        reader = inventory_reader or baseline_tool.acquire_fresh_inventory
+        tool_commit = release_sha
+        _verify_fresh_snapshot(reader, current["release"]["inventory_tool_commit"],
+                               current["reference_files"], current["inventory"]["exclusion"],
+                               current["inventory_sha256"])
+        artifact = verify_artifact(package_root, inventory_path, release_sha,
+                                   provenance_path=provenance_path, archive_path=archive_path,
+                                   expected_run_id=run_id)
+        plan_result = make_release_state_plan(
+            current, artifact, operation_id, approved_removals=approved_removals,
+            removal_approval=removal_approval)
+        plan = plan_result["plan"]
+        candidate_rows = plan_result["candidate_reference_files"]
+        artifact_sha = _artifact_file_digest(pathlib.Path(archive_path), 2 * 1024 * 1024 * 1024)
+        return _run_filesystem_release_transaction(
+            operation_kind="publish", operation_id=operation_id, release_id=release_id,
+            commit_sha=release_sha, inventory_tool_commit=tool_commit,
+            artifact_sha256=artifact_sha, source_root=package_root,
+            candidate_rows=candidate_rows, plan=plan, rollback_target_release_id=None,
+            approved_removals=approved_removals, current_state=current, private=private,
+            lock_fd=lock_fd, private_root=private_root, public_root=public_root,
+            expected_private_root=expected_private_root, expected_public_root=expected_public_root,
+            quota_free_bytes=quota_free_bytes, inventory_reader=reader,
+            health_check=health_check, rollback_health_check=rollback_health_check,
+            fault_hook=fault_hook)
+    except (backup_tool.BackupError, baseline_tool.BaselineError,
+            release_state_tool.ReleaseStateError, OSError, ValueError) as exc:
+        if isinstance(exc, PublisherError):
+            raise
+        raise PublisherError(f"Publish filesystem bloccato: {exc}") from exc
+    finally:
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if private is not None:
+            backup_tool.close_private_directories(private)
+
+
+def rollback_filesystem_release(*, target_release_id, backup_id, manifest_sha256,
+                                operation_id, quota_free_bytes, private_root,
+                                expected_private_root, public_root, expected_public_root,
+                                health_check, rollback_health_check=None, inventory_reader=None,
+                                approved_removals=(), removal_approval=None, fault_hook=None):
+    """Rollback verificato a uno snapshot e backup appartenenti alla catena release."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not callable(health_check):
+        raise PublisherError("Rollback richiede POSIX/O_NOFOLLOW e health check.")
+    if pathlib.Path(public_root) != pathlib.Path(expected_public_root):
+        raise PublisherError("Root pubblica diversa dal target autorizzato.")
+    private = lock_fd = None
+    try:
+        private, lock_fd = _open_release_context(private_root, expected_private_root)
+        current, events = _load_locked_release(private)
+        if current["schema_version"] != release_state_tool.APPLICATION_STATE_SCHEMA:
+            raise PublisherError("Rollback applicativo disponibile solo dopo una release schema 2.")
+        if any(event["operation_id"] == operation_id for event in events):
+            raise PublisherError("ID operazione rollback già usato nel journal.")
+        reader = inventory_reader or baseline_tool.acquire_fresh_inventory
+        _verify_fresh_snapshot(reader, current["release"]["inventory_tool_commit"],
+                               current["reference_files"], current["inventory"]["exclusion"],
+                               current["inventory_sha256"])
+        chain = current["release_chain"]
+        records = [chain["root"], *chain["entries"]]
+        target = next((row for row in records if row["release_id"] == target_release_id), None)
+        if target is None or target_release_id == current["release"]["release_id"]:
+            raise PublisherError("Release target non storica o non presente nella catena verificata.")
+        target_backup = next((row["backup"] for row in chain["entries"]
+                              if row["parent_release_id"] == target_release_id
+                              and row["backup"]["release_id"] == target_release_id), None)
+        if (target_backup is None or target_backup["backup_id"] != backup_id
+                or target_backup["manifest_sha256"] != manifest_sha256):
+            raise PublisherError("Backup esplicito non corrisponde allo snapshot target autorizzato.")
+        baseline_sha = current["initial_baseline"]["sha256"]
+        verification = backup_tool.verify_backup(
+            backup_id, baseline_sha, manifest_sha256, private_root=private_root,
+            expected_private_root=expected_private_root, lock_fd=lock_fd)
+        if verification.get("status") != "verified":
+            raise PublisherError("Backup storico target non verificato.")
+        restore_report = backup_tool.restore_test(
+            backup_id, baseline_sha, manifest_sha256, quota_free_bytes,
+            private_root=private_root, expected_private_root=expected_private_root,
+            lock_fd=lock_fd)
+        source_root = pathlib.Path(restore_report["restore_test_path"])
+        target_rows = release_state_tool.resolve_release_snapshot(
+            current, target_release_id, target["inventory_sha256"])
+        artifact_records = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                            for row in target_rows}
+        operation_id = str(operation_id)
+        plan_result = make_release_state_plan(
+            current, artifact_records, operation_id, approved_removals=approved_removals,
+            removal_approval=removal_approval, operation_kind="rollback",
+            rollback_target_release_id=target_release_id)
+        rollback_release_id = "rollback-" + hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:24]
+        return _run_filesystem_release_transaction(
+            operation_kind="rollback", operation_id=operation_id, release_id=rollback_release_id,
+            commit_sha=target["commit_sha"], inventory_tool_commit=target["inventory_tool_commit"],
+            artifact_sha256=None, source_root=source_root,
+            candidate_rows=plan_result["candidate_reference_files"], plan=plan_result["plan"],
+            rollback_target_release_id=target_release_id, approved_removals=approved_removals,
+            current_state=current, private=private, lock_fd=lock_fd,
+            private_root=private_root, public_root=public_root,
+            expected_private_root=expected_private_root, expected_public_root=expected_public_root,
+            quota_free_bytes=quota_free_bytes, inventory_reader=reader,
+            health_check=health_check, rollback_health_check=rollback_health_check,
+            fault_hook=fault_hook)
+    except (backup_tool.BackupError, baseline_tool.BaselineError,
+            release_state_tool.ReleaseStateError, OSError, ValueError) as exc:
+        if isinstance(exc, PublisherError):
+            raise
+        raise PublisherError(f"Rollback filesystem bloccato: {exc}") from exc
+    finally:
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if private is not None:
+            backup_tool.close_private_directories(private)
+
+
+def recover_filesystem_release(*, operation_id, private_root, expected_private_root,
+                               public_root, expected_public_root, quota_free_bytes,
+                               health_check, inventory_reader=None):
+    """Riprende una transazione interrotta dal journal e dal manifest privato verificato."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not callable(health_check):
+        raise PublisherError("Recovery richiede POSIX/O_NOFOLLOW e health check.")
+    if pathlib.Path(public_root) != pathlib.Path(expected_public_root):
+        raise PublisherError("Root pubblica diversa dal target autorizzato.")
+    private = lock_fd = transaction_dir_fd = None
+    try:
+        private, lock_fd = _open_release_context(private_root, expected_private_root)
+        current = release_state_tool.load_current_state(private["state_fd"])
+        events = release_state_tool.read_journal_at(private["state_fd"])
+        operation = [event for event in events if event["operation_id"] == operation_id]
+        if not operation or operation[0]["status"] != "prepared":
+            raise PublisherError("Operazione assente dal journal o senza evento prepared.")
+        prepared = operation[0]["details"]
+        manifest_sha = prepared.get("transaction_manifest_sha256")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(manifest_sha or "")):
+            raise PublisherError("Journal senza digest del manifest privato di recovery.")
+        transaction_dir_fd = _transaction_directory(private["staging_fd"])
+        raw_manifest = _read_private_file_at(transaction_dir_fd, f"transaction-{operation_id}.json")
+        if hashlib.sha256(raw_manifest).hexdigest() != manifest_sha:
+            raise PublisherError("Manifest transazione privato alterato.")
+        try:
+            manifest = release_state_tool._read_json(raw_manifest, "manifest transazione")
+        except release_state_tool.ReleaseStateError as exc:
+            raise PublisherError(f"Manifest transazione non valido: {exc}") from exc
+        required = {"schema_version", "operation_id", "operation_kind", "release_id", "commit_sha",
+                    "inventory_tool_commit", "artifact_sha256", "parent_state_sha256", "parent_release_id",
+                    "parent_inventory_sha256", "backup", "plan", "plan_sha256", "rollback_target_release_id",
+                    "parent_reference_files", "candidate_reference_files", "source_root", "recovery_root",
+                    "public_root", "approved_removals"}
+        if (not isinstance(manifest, dict) or set(manifest) != required
+                or manifest["schema_version"] != 1 or manifest["operation_id"] != operation_id
+                or manifest["public_root"] != str(pathlib.Path(public_root))
+                or release_state_tool.digest_json(manifest["plan"]) != manifest["plan_sha256"]):
+            raise PublisherError("Manifest recovery non corrispondente a operazione, parent o destinazione.")
+        if (prepared.get("parent_state_sha256") != manifest["parent_state_sha256"]
+                or prepared.get("parent_release_id") != manifest["parent_release_id"]
+                or prepared.get("parent_inventory_sha256") != manifest["parent_inventory_sha256"]):
+            raise PublisherError("Manifest recovery non corrisponde all'intento nel journal.")
+        if current["state_sha256"] != manifest["parent_state_sha256"]:
+            if (current.get("schema_version") == release_state_tool.APPLICATION_STATE_SCHEMA
+                    and current.get("release_chain", {}).get("entries")
+                    and current["release_chain"]["entries"][-1].get("operation_id") == operation_id):
+                release_state_tool.validate_current_state_journal(current, events)
+                _verify_fresh_snapshot(
+                    inventory_reader or baseline_tool.acquire_fresh_inventory,
+                    current["release"]["inventory_tool_commit"], current["reference_files"],
+                    current["inventory"]["exclusion"], current["inventory_sha256"])
+                return {"status": "already-finalized", "operation_id": operation_id,
+                        "state_sha256": current["state_sha256"], "public_writes_performed": False}
+            raise PublisherError("Current-release non coincide né con il parent né con la transazione conclusa.")
+        if (manifest["parent_release_id"] != current["release"]["release_id"]
+                or manifest["parent_inventory_sha256"] != current["inventory_sha256"]):
+            raise PublisherError("Manifest recovery parent diverso dal current-release.")
+        backup_reference = manifest["backup"]
+        baseline_sha = current["initial_baseline"]["sha256"]
+        _verify_backup_for_parent(private, current, backup_reference)
+        recovery_root = pathlib.Path(manifest["recovery_root"])
+        staging_root = pathlib.Path(private_root) / "staging"
+        _require_staging_path(staging_root, recovery_root, "snapshot recovery", directory=True)
+        if recovery_root.name != "restored":
+            raise PublisherError("Directory recovery non è la root estratta autorizzata.")
+        actual_snapshot = inventory_target_tree(recovery_root)
+        parent_expected = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                           for row in manifest["parent_reference_files"]}
+        if actual_snapshot != parent_expected:
+            raise PublisherError("Snapshot privato di recovery diverso dal parent verificato.")
+
+        operation_status = operation[-1]["status"]
+        if operation_status in ("release_committed", "release_rolled_back"):
+            health_event = next((event for event in reversed(operation)
+                                 if event["status"] == "health_verified"), None)
+            candidate_digest = health_event["details"].get("candidate_state_sha256") if health_event else None
+            if not re.fullmatch(r"[a-f0-9]{64}", str(candidate_digest or "")):
+                raise PublisherError("Terminale presente ma stato candidato durevole assente.")
+            candidate_raw = _read_private_file_at(
+                transaction_dir_fd, f"candidate-{operation_id}.json")
+            if hashlib.sha256(candidate_raw).hexdigest() != candidate_digest:
+                raise PublisherError("Stato candidato privato alterato dopo il terminale.")
+            candidate = release_state_tool.validate_state_document(
+                release_state_tool._read_json(candidate_raw, "stato candidato"), baseline_sha)
+            if (candidate["release_chain"]["entries"][-1]["operation_id"] != operation_id
+                    or current["state_sha256"] != manifest["parent_state_sha256"]):
+                raise PublisherError("Stato candidato terminale non discende dal parent corrente.")
+            reader = inventory_reader or baseline_tool.acquire_fresh_inventory
+            release_state_tool.validate_fresh_release_inventories(
+                candidate, (reader(candidate["release"]["inventory_tool_commit"]),
+                           reader(candidate["release"]["inventory_tool_commit"])))
+            # L'evidenza originale è già legata al candidato conservato e al
+            # terminale journalizzato. Dopo un crash si richiede un nuovo esito
+            # sano, ma il digest non deve coincidere: i controlli HTTP includono
+            # timestamp e altri dati variabili tra richieste.
+            recovery_health, _ = _health_evidence(health_check)
+            promoted = release_state_tool.persist_verified_application_release_state(
+                candidate, current["state_sha256"], private_root=private_root,
+                expected_root=expected_private_root, baseline_sha256=baseline_sha,
+                inventory_reader=reader, lock_fd=lock_fd)
+            return {"status": "finalized-after-interruption", "operation_id": operation_id,
+                    "state": promoted, "health_evidence": recovery_health,
+                    "public_writes_performed": False}
+
+        if operation_status == "recovery_completed":
+            release_state_tool.validate_current_state_journal(current, events)
+            return {"status": "already-recovered", "operation_id": operation_id,
+                    "state_sha256": current["state_sha256"], "public_writes_performed": False}
+        if operation_status != "recovery_required":
+            release_state_tool.append_operation_event(
+                private["state_fd"], private["locks_fd"], operation_id, "recovery_required",
+                {"reason": "process-interruption", "message": "Recovery manuale verificata"},
+                lock_fd=lock_fd)
+        recovered = recover_file_snapshot(
+            recovery_root, public_root, manifest["parent_reference_files"],
+            manifest["candidate_reference_files"])
+        if recovered["inventory"] != parent_expected:
+            raise PublisherError("Inventario live non ripristinato al parent.")
+        reader = inventory_reader or baseline_tool.acquire_fresh_inventory
+        _verify_fresh_snapshot(reader, current["release"]["inventory_tool_commit"],
+                               current["reference_files"], current["inventory"]["exclusion"],
+                               current["inventory_sha256"])
+        _, health_digest = _health_evidence(health_check)
+        result = release_state_tool.append_verified_recovery_completion(
+            operation_id, current["state_sha256"], backup_id=backup_reference["backup_id"],
+            backup_manifest_sha256=backup_reference["manifest_sha256"],
+            restored_inventory_sha256=current["inventory_sha256"],
+            health_evidence_sha256=health_digest, private_root=private_root,
+            expected_root=expected_private_root, inventory_reader=reader, lock_fd=lock_fd)
+        return {"status": result["status"], "operation_id": operation_id,
+                "state_sha256": current["state_sha256"],
+                "files_restored": recovered["written"], "public_writes_performed": True}
+    except (backup_tool.BackupError, baseline_tool.BaselineError,
+            release_state_tool.ReleaseStateError, OSError, ValueError, KeyError) as exc:
+        if isinstance(exc, PublisherError):
+            raise
+        raise PublisherError(f"Recovery bloccata in fail-closed: {exc}") from exc
+    finally:
+        if transaction_dir_fd is not None:
+            os.close(transaction_dir_fd)
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if private is not None:
+            backup_tool.close_private_directories(private)
 
 
 def _load_verified_current_state(expected_state_sha256):

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from unittest import mock
 
 import production_publisher as publisher
 import test_application_release_state as release_state_fixtures
+import test_release_state_tool as bootstrap_fixtures
 
 
 class ProductionArtifactTests(unittest.TestCase):
@@ -103,6 +105,265 @@ class ProductionArtifactTests(unittest.TestCase):
         return [{"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
                  "mode": "644", "classification": classifications.get(path, "artifact")}
                 for path, data in sorted(content.items())]
+
+    def _release_fixture(self):
+        fixture = bootstrap_fixtures.ReleaseStateTests("test_01_bootstrap_valido_e_non_sovrascrivibile")
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        # La baseline di test contiene tutti i nove extra approvati, come il caso IONOS.
+        for index in range(2, 9):
+            path = f"themes/sarafatto/assets/dist/assets/app-old{index:02d}Ab12.js"
+            data = f"old bundle {index}".encode()
+            fixture.files[path] = (data, "retained-vite-bundle", "644")
+            target = fixture.public / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            target.chmod(0o644)
+        fixture.write_baseline()
+        fixture.approved_baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        for name in ("backups", "staging"):
+            path = fixture.private / name
+            path.mkdir()
+            if os.name == "posix":
+                path.chmod(0o700)
+        fixture.bootstrap()
+        self.assertEqual(len([row for row in fixture.files.values()
+                              if row[1] == "retained-vite-bundle"]) + 1, 9)
+        return fixture
+
+    @staticmethod
+    def _inventory_reader(public, excluded_files=2):
+        def read(_commit):
+            records = publisher.inventory_target_tree(public)
+            lines = [f"EXCLUDED\t{publisher.baseline_tool.EXCLUDED}\t{excluded_files}\t0\n"]
+            lines.extend(f"FILE\t{row['sha256']}\t{row['size']}\t{row['mode']}\t{path}\n"
+                         for path, row in sorted(records.items()))
+            lines.append("END\n")
+            return "".join(lines)
+        return read
+
+    def _stage_release_inputs(self, fixture):
+        staging = fixture.private / "staging"
+        package = staging / "artifact-package"
+        shutil.copytree(self.package, package)
+        paths = {}
+        for label, source in (("inventory", self.inventory), ("provenance", self.provenance),
+                              ("archive", self.archive)):
+            destination = staging / f"artifact-{label}"
+            shutil.copyfile(source, destination)
+            paths[label] = destination
+        paths["package"] = package
+        return paths
+
+    @staticmethod
+    def _removal_approval(state, removed_path, approval_id):
+        row = next(row for row in state["reference_files"] if row["path"] == removed_path)
+        removals = [{"path": removed_path, "sha256": row["sha256"]}]
+        return removals, {
+            "approval_id": approval_id, "reviewer": "fixture-reviewer",
+            "approved_at_utc": "2026-10-27T12:00:00Z",
+            "parent_release_id": state["release"]["release_id"],
+            "parent_inventory_sha256": state["inventory_sha256"],
+            "removals_sha256": publisher.release_state_tool.digest_json(removals),
+        }
+
+    @staticmethod
+    def _journal_events(fixture):
+        fd = os.open(fixture.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            return publisher.release_state_tool.read_journal_at(fd)
+        finally:
+            os.close(fd)
+
+    def _publish_fixture_b(self, fixture, *, fault_hook=None, health_check=None):
+        paths = self._stage_release_inputs(fixture)
+        baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        state = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        removals, approval = self._removal_approval(
+            state, "themes/sarafatto/front-page.php", "approve-remove-front-page")
+        reader = self._inventory_reader(fixture.public)
+        return publisher.publish_filesystem_release(
+            package_root=paths["package"], inventory_path=paths["inventory"],
+            provenance_path=paths["provenance"], archive_path=paths["archive"],
+            release_sha="a" * 40, run_id="12345", release_id="release-B-fixture",
+            operation_id="publish-B-fixture", quota_free_bytes=10**10,
+            private_root=fixture.private, expected_private_root=fixture.private,
+            public_root=fixture.public, expected_public_root=fixture.public,
+            health_check=health_check or (lambda: {"status": "healthy", "check": "fixture"}),
+            rollback_health_check=lambda: {"status": "healthy", "check": "fixture-parent"},
+            inventory_reader=reader, approved_removals=removals,
+            removal_approval=approval, fault_hook=fault_hook)
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Orchestrazione reale su filesystem richiede POSIX e openat.")
+    def test_orchestrazione_publish_B_health_e_rollback_A_con_nove_extra(self):
+        fixture = self._release_fixture()
+        baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        state_a = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        parent_bytes = {path: fixture.public.joinpath(*path.split("/")).read_bytes()
+                        for path in fixture.files}
+        sentinels = {
+            "uploads/product.txt": b"cms product data",
+            "plugins/woocommerce/plugin.php": b"third-party plugin",
+            "wp-core-version.php": b"wordpress core sentinel",
+        }
+        for relative, payload in sentinels.items():
+            path = fixture.public / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+
+        published = self._publish_fixture_b(fixture)
+        self.assertEqual(published["status"], "published")
+        self.assertTrue(published["public_writes_performed"])
+        state_b = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        self.assertEqual(state_b["release"]["release_id"], "release-B-fixture")
+        self.assertEqual(publisher.inventory_target_tree(fixture.public), {
+            row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+            for row in state_b["reference_files"]})
+        for path, payload in sentinels.items():
+            self.assertEqual((fixture.public / path).read_bytes(), payload)
+        for path, payload in parent_bytes.items():
+            if "app-old" in path or path.endswith("home-hero.php.bak"):
+                self.assertEqual(fixture.public.joinpath(*path.split("/")).read_bytes(), payload)
+
+        target_rows = state_a["reference_files"]
+        target_paths = {row["path"] for row in target_rows}
+        removals = [{"path": row["path"], "sha256": row["sha256"]}
+                    for row in state_b["reference_files"]
+                    if row["path"] not in target_paths and row["classification"] == "artifact"]
+        removals.sort(key=lambda row: row["path"])
+        rollback_approval = {
+            "approval_id": "approve-rollback-fixture", "reviewer": "fixture-reviewer",
+            "approved_at_utc": "2026-10-27T12:10:00Z",
+            "parent_release_id": state_b["release"]["release_id"],
+            "parent_inventory_sha256": state_b["inventory_sha256"],
+            "removals_sha256": publisher.release_state_tool.digest_json(removals),
+        }
+        backup = published["backup"]
+        rolled_back = publisher.rollback_filesystem_release(
+            target_release_id=state_a["release"]["release_id"], backup_id=backup["backup_id"],
+            manifest_sha256=backup["manifest_sha256"], operation_id="rollback-B-to-A-fixture",
+            quota_free_bytes=10**10, private_root=fixture.private,
+            expected_private_root=fixture.private, public_root=fixture.public,
+            expected_public_root=fixture.public,
+            health_check=lambda: {"status": "healthy", "check": "fixture-after-rollback"},
+            rollback_health_check=lambda: {"status": "healthy", "check": "fixture-parent"},
+            inventory_reader=self._inventory_reader(fixture.public),
+            approved_removals=removals, removal_approval=rollback_approval)
+        self.assertEqual(rolled_back["status"], "rolled-back")
+        state_after = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        self.assertEqual(state_after["release_chain"]["entries"][-1]["rollback_target_release_id"],
+                         state_a["release"]["release_id"])
+        self.assertEqual(publisher.inventory_target_tree(fixture.public), {
+            row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+            for row in state_a["reference_files"]})
+        for path, payload in sentinels.items():
+            self.assertEqual((fixture.public / path).read_bytes(), payload)
+        for path, payload in parent_bytes.items():
+            self.assertEqual(fixture.public.joinpath(*path.split("/")).read_bytes(), payload)
+        events = self._journal_events(fixture)
+        self.assertEqual(events[-1]["status"], "release_rolled_back")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Rollback automatico end-to-end richiede filesystem POSIX.")
+    def test_orchestrazione_health_check_fallito_ripristina_A(self):
+        fixture = self._release_fixture()
+        baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        state_a = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        parent = {path: target.read_bytes() for path in fixture.files
+                  if (target := fixture.public.joinpath(*path.split("/"))).is_file()}
+
+        def unhealthy_after_publish():
+            return {"status": "unhealthy", "check": "fixture-B"}
+
+        with self.assertRaisesRegex(publisher.PublisherError, "rollback al parent ripristinato"):
+            self._publish_fixture_b(fixture, health_check=unhealthy_after_publish)
+
+        current = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        self.assertEqual(current["state_sha256"], state_a["state_sha256"])
+        actual = publisher.inventory_target_tree(fixture.public)
+        expected = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                    for row in state_a["reference_files"]}
+        self.assertEqual(actual, expected)
+        for relative, data in parent.items():
+            self.assertEqual(fixture.public.joinpath(*relative.split("/")).read_bytes(), data)
+        events = self._journal_events(fixture)
+        self.assertEqual(events[-1]["status"], "recovery_completed")
+        self.assertNotIn("release_committed", [event["status"] for event in events])
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Fault injection transazionale richiede filesystem POSIX.")
+    def test_orchestrazione_interruzione_file_e_recovery_al_parent(self):
+        fixture = self._release_fixture()
+
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        def crash(event, _path, count):
+            if event == "after-file" and count == 2:
+                raise SimulatedProcessCrash("crash dopo due scritture")
+
+        with self.assertRaises(SimulatedProcessCrash):
+            self._publish_fixture_b(fixture, fault_hook=crash)
+        baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        before = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        recovered = publisher.recover_filesystem_release(
+            operation_id="publish-B-fixture", private_root=fixture.private,
+            expected_private_root=fixture.private, public_root=fixture.public,
+            expected_public_root=fixture.public, quota_free_bytes=10**10,
+            health_check=lambda: {"status": "healthy", "check": "fixture-recovered-parent"},
+            inventory_reader=self._inventory_reader(fixture.public))
+        self.assertEqual(recovered["status"], "recovery_completed")
+        after = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        self.assertEqual(after["state_sha256"], before["state_sha256"])
+        self.assertEqual(publisher.inventory_target_tree(fixture.public), {
+            row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+            for row in before["reference_files"]})
+        self.assertEqual(self._journal_events(fixture)[-1]["status"], "recovery_completed")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Recovery post-terminal richiede filesystem POSIX.")
+    def test_orchestrazione_interruzione_dopo_terminale_finalizza_release(self):
+        fixture = self._release_fixture()
+
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        def crash(event, _path, _count):
+            if event == "after-terminal":
+                raise SimulatedProcessCrash("crash dopo terminale journal")
+
+        with self.assertRaises(SimulatedProcessCrash):
+            self._publish_fixture_b(fixture, fault_hook=crash)
+        baseline_sha = hashlib.sha256(fixture.baseline_path.read_bytes()).hexdigest()
+        result = publisher.recover_filesystem_release(
+            operation_id="publish-B-fixture", private_root=fixture.private,
+            expected_private_root=fixture.private, public_root=fixture.public,
+            expected_public_root=fixture.public, quota_free_bytes=10**10,
+            health_check=lambda: {"status": "healthy", "check": "fresh-recovery-check"},
+            inventory_reader=self._inventory_reader(fixture.public))
+        self.assertEqual(result["status"], "finalized-after-interruption")
+        self.assertEqual(result["health_evidence"]["check"], "fresh-recovery-check")
+        final = publisher.release_state_tool.validate_state_document(
+            json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
+            baseline_sha)
+        self.assertEqual(final["release"]["release_id"], "release-B-fixture")
 
     @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
                          "Il writer dir_fd/O_NOFOLLOW si valida obbligatoriamente su Ubuntu CI.")

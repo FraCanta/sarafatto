@@ -689,7 +689,8 @@ def inventory_text_for_backup(baseline_commit_sha):
 
 def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
                   private_root=PRIVATE_ROOT, expected_private_root=PRIVATE_ROOT,
-                  public_root=PUBLIC_WP_CONTENT, baseline_path=None):
+                  public_root=PUBLIC_WP_CONTENT, baseline_path=None, lock_fd=None,
+                  inventory_reader=None):
     validate_id(backup_id)
     if baseline_path is not None and pathlib.Path(baseline_path) != pathlib.Path(private_root) / "state" / "baseline.json":
         raise BackupError("Percorso baseline arbitrario non consentito.")
@@ -698,7 +699,9 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
     try:
         assert_private_root_still_named(private)
         assert_private_child_still_named(private, "locks")
-        lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        owned_lock = lock_fd is None
+        if owned_lock:
+            lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
@@ -719,7 +722,8 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
             pass
         else:
             raise BackupError("Backup ID già esistente: nessuna sovrascrittura consentita.")
-        first_text = inventory_text_for_backup(inventory_commit)
+        read_inventory = inventory_reader or inventory_text_for_backup
+        first_text = read_inventory(inventory_commit)
         files, symlinks, exclusion, first_digest = parse_inventory_text(first_text)
         summary = compare_inventory_to_baseline(files, symlinks, exclusion, expected)
         total_bytes = sum(row["size"] for row in expected.values())
@@ -750,7 +754,7 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
         verify_backup_directory(None, backup_id, baseline_digest, manifest_hash,
                                 require_complete=True, directory_fd=temporary_fd)
 
-        second_text = inventory_text_for_backup(inventory_commit)
+        second_text = read_inventory(inventory_commit)
         after_files, after_links, after_exclusion, second_digest = parse_inventory_text(second_text)
         compare_inventory_to_baseline(after_files, after_links, after_exclusion, expected)
         if first_digest != second_digest:
@@ -773,9 +777,10 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
     finally:
         if temporary_fd is not None:
             os.close(temporary_fd)
-        import fcntl
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if owned_lock:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         close_private_directories(private)
 
 
@@ -935,14 +940,16 @@ def rename_backup_noreplace(source, destination, directory_fd=None, temporary_fd
 
 
 def verify_backup(backup_id, baseline_sha256, manifest_sha256, *, private_root=PRIVATE_ROOT,
-                  expected_private_root=PRIVATE_ROOT):
+                  expected_private_root=PRIVATE_ROOT, lock_fd=None):
     validate_id(backup_id)
     private = open_private_directories(private_root, expected_private_root)
     paths = private["paths"]
     try:
         assert_private_root_still_named(private)
         assert_private_child_still_named(private, "locks")
-        lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        owned_lock = lock_fd is None
+        if owned_lock:
+            lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
@@ -966,9 +973,10 @@ def verify_backup(backup_id, baseline_sha256, manifest_sha256, *, private_root=P
     finally:
         if backup_fd is not None:
             os.close(backup_fd)
-        import fcntl
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if owned_lock:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         close_private_directories(private)
 
 
@@ -1184,14 +1192,17 @@ def verify_restored_tree_fd(root_fd, expected_files):
 
 
 def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, *,
-                 private_root=PRIVATE_ROOT, expected_private_root=PRIVATE_ROOT, disk_free_bytes=None):
+                 private_root=PRIVATE_ROOT, expected_private_root=PRIVATE_ROOT, disk_free_bytes=None,
+                 lock_fd=None):
     validate_id(backup_id)
     private = open_private_directories(private_root, expected_private_root)
     paths = private["paths"]
     try:
         assert_private_root_still_named(private)
         assert_private_child_still_named(private, "locks")
-        lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        owned_lock = lock_fd is None
+        if owned_lock:
+            lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
@@ -1201,15 +1212,17 @@ def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, 
         assert_directory_still_named(private["root_fd"], "backups", private["backups_fd"], "backups")
         assert_private_root_still_named(private)
         assert_directory_still_named(private["root_fd"], "staging", private["staging_fd"], "staging")
+        baseline_document, digest, commit_sha, baseline_expected = validate_backup_baseline(
+            None, baseline_sha256, state_fd=private["state_fd"])
         try:
-            release_state.unresolved_operation(release_state.read_journal_at(private["state_fd"]))
+            current = release_state.load_current_state(private["state_fd"], digest)
+            events = release_state.read_journal_at(private["state_fd"])
+            release_state.validate_current_state_journal(current, events)
         except release_state.ReleaseStateError as exc:
-            raise BackupError(f"Restore-test bloccato da operazione incompleta: {exc}") from exc
+            raise BackupError(f"Restore-test bloccato da stato/journal non verificabile: {exc}") from exc
         backup_fd = open_directory_at(private["backups_fd"], backup_id, "backup")
         verification = verify_backup_directory(None, backup_id, baseline_sha256, manifest_sha256,
                                                directory_fd=backup_fd)
-        _, digest, commit_sha, baseline_expected = validate_backup_baseline(
-            None, baseline_sha256, state_fd=private["state_fd"])
         assert_private_child_still_named(private, "state")
         expected = expected_for_backup_manifest(private["state_fd"], baseline_expected,
                                                 verification["manifest"], digest)
@@ -1230,9 +1243,10 @@ def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, 
     finally:
         if backup_fd is not None:
             os.close(backup_fd)
-        import fcntl
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if owned_lock:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         close_private_directories(private)
 
 
