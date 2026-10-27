@@ -18,11 +18,14 @@ import stat
 import sys
 import tarfile
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 import baseline_tool
 import backup_tool
 import production_adapter
+import release_state_tool
 
 REPOSITORY_ROOT = pathlib.Path("/home/www/sarafatto-repo")
 PUBLIC_ROOT = pathlib.Path("/home/www/public/wp-content")
@@ -256,11 +259,17 @@ def _walk_package(package_root):
             if stat.S_ISDIR(info.st_mode):
                 if not _allowed_directory(rel):
                     raise PublisherError(f"Directory fuori allowlist nell'artefatto: {rel}.")
+                if os.name == "posix" and (stat.S_IMODE(info.st_mode) & 0o022
+                                            or stat.S_IMODE(info.st_mode) & 0o6000):
+                    raise PublisherError(f"Permessi directory non sicuri nell'artefatto: {rel}.")
                 visit(entry, rel)
             elif stat.S_ISREG(info.st_mode):
                 if (not baseline_tool.safe_path(rel) or not _in_component(rel)
                         or baseline_tool.excluded(rel)):
                     raise PublisherError(f"File artefatto fuori perimetro: {rel}.")
+                if os.name == "posix" and (stat.S_IMODE(info.st_mode) & 0o022
+                                            or stat.S_IMODE(info.st_mode) & 0o6000):
+                    raise PublisherError(f"Permessi file non sicuri nell'artefatto: {rel}.")
                 records[rel] = {"sha256": _sha256(entry, info), "size": info.st_size,
                                 "mode": format(stat.S_IMODE(info.st_mode), "o")}
             else:
@@ -405,6 +414,438 @@ def plan_inventory_changes(candidate, live, reference):
     return changes, retained, blockers
 
 
+def make_release_state_plan(current_state, artifact_records, operation_id, *,
+                            approved_removals=(), removal_approval=None):
+    """Crea il piano schema-release senza scrivere né autorizzare rimozioni.
+
+    I file extra registrati nello stato corrente vengono mantenuti nello snapshot
+    candidato. Se l'artefatto tenta di cambiarli, o omette un file gestito senza
+    un'approvazione esplicita separata, il validatore dello stato rifiuta il piano.
+    """
+    current_rows = {row["path"]: row for row in current_state["reference_files"]}
+    candidate_rows = {}
+    for path, row in artifact_records.items():
+        previous = current_rows.get(path)
+        classification = (previous["classification"]
+                          if previous and previous["classification"] != "artifact"
+                          else "artifact")
+        candidate_rows[path] = {
+            "path": path, "sha256": row["sha256"], "size": row["size"],
+            "mode": row["mode"], "classification": classification,
+        }
+    for path, row in current_rows.items():
+        # I bundle Vite hashati omessi dalla build restano disponibili per cache
+        # HTML e client che li richiedano durante o subito dopo il rilascio.
+        if (path.startswith("themes/sarafatto/assets/dist/")
+                and path not in candidate_rows):
+            retained = dict(row)
+            retained["classification"] = "retained-vite-bundle"
+            candidate_rows[path] = retained
+        elif row["classification"] != "artifact" and path not in candidate_rows:
+            candidate_rows[path] = dict(row)
+    ordered_rows = [candidate_rows[path] for path in sorted(candidate_rows)]
+    plan, digest = release_state_tool.make_application_release_plan(
+        current_state, ordered_rows, operation_id, approved_removals=approved_removals,
+        removal_approval=removal_approval)
+    return {"operation_id": operation_id, "plan": plan, "plan_sha256": digest,
+            "candidate_reference_files": ordered_rows}
+
+
+def _target_path_parts(relative):
+    if (not isinstance(relative, str) or not baseline_tool.safe_path(relative)
+            or not _in_component(relative) or baseline_tool.excluded(relative)):
+        raise PublisherError(f"Percorso target fuori allowlist: {relative!r}.")
+    return relative.split("/")
+
+
+def _open_target_parent(root_fd, relative, *, create=False):
+    """Apre il parent di un file gestito senza seguire symlink."""
+    parts = _target_path_parts(relative)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            info = os.fstat(child)
+            if not stat.S_ISDIR(info.st_mode):
+                os.close(child)
+                raise PublisherError(f"Directory target non valida: {relative}.")
+            os.close(fd)
+            fd = child
+        return fd, parts[-1]
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _hash_at(parent_fd, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise PublisherError(f"Target non regolare o hard link: {name}.")
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            size += len(block)
+        after = os.fstat(fd)
+        if (size != info.st_size or after.st_size != info.st_size
+                or after.st_mtime_ns != info.st_mtime_ns or after.st_ctime_ns != info.st_ctime_ns):
+            raise PublisherError(f"Target cambiato durante la verifica: {name}.")
+        return {"sha256": digest.hexdigest(), "size": size,
+                "mode": format(stat.S_IMODE(info.st_mode), "o"),
+                "uid": info.st_uid, "gid": info.st_gid}
+    finally:
+        os.close(fd)
+
+
+def inventory_target_tree(root):
+    """Inventario no-follow dei soli componenti gestiti (usato anche dalle fixture)."""
+    root = pathlib.Path(root)
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise PublisherError("Inventario target richiede primitive POSIX no-follow.")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    records = {}
+
+    def walk(directory_fd, prefix):
+        for name in sorted(os.listdir(directory_fd)):
+            relative = f"{prefix}/{name}" if prefix else name
+            if relative == "themes/sarafatto/node_modules" or relative.startswith("themes/sarafatto/node_modules/"):
+                continue
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise PublisherError(f"Symlink nel perimetro gestito: {relative}.")
+            if stat.S_ISDIR(info.st_mode):
+                if not _allowed_directory(relative):
+                    raise PublisherError(f"Directory target fuori allowlist: {relative}.")
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    walk(child, relative)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                if not _in_component(relative) or not baseline_tool.safe_path(relative):
+                    raise PublisherError(f"File target fuori allowlist: {relative}.")
+                row = _hash_at(directory_fd, name)
+                row.pop("uid")
+                row.pop("gid")
+                records[relative] = row
+            else:
+                raise PublisherError(f"File speciale nel perimetro: {relative}.")
+
+    try:
+        for component in ALLOWED_COMPONENTS:
+            parent_fd, leaf = _open_target_parent(root_fd, component)
+            try:
+                info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise PublisherError(f"Componente gestito symlink: {component}.")
+                if component == ALLOWED_COMPONENTS[2]:
+                    if not stat.S_ISREG(info.st_mode):
+                        raise PublisherError("MU-plugin gestito non regolare.")
+                    row = _hash_at(parent_fd, leaf)
+                    row.pop("uid")
+                    row.pop("gid")
+                    records[component] = row
+                else:
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise PublisherError(f"Componente non-directory: {component}.")
+                    child = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                    try:
+                        walk(child, component)
+                    finally:
+                        os.close(child)
+            finally:
+                os.close(parent_fd)
+        return records
+    finally:
+        os.close(root_fd)
+
+
+def apply_file_snapshot(source_root, target_root, current_rows, candidate_rows, *,
+                        approved_removals=(), fault_hook=None):
+    """Applica file allowlistati con rename atomico per file; non è atomico per release.
+
+    La funzione verifica l'intero snapshot parent prima di scrivere. I file extra
+    devono essere presenti identici nel candidato. Le rimozioni richiedono una
+    lista esatta di path+SHA; nessun delete ricorsivo è usato.
+    """
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise PublisherError("Writer filesystem richiede POSIX/O_NOFOLLOW.")
+    source_root, target_root = pathlib.Path(source_root), pathlib.Path(target_root)
+    source_records = _walk_package(source_root)
+    target_records = inventory_target_tree(target_root)
+    expected_current = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                        for row in current_rows}
+    if target_records != expected_current:
+        raise PublisherError("Inventario target cambiato o diverso dallo stato parent.")
+    desired = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+               for row in candidate_rows}
+    for row in candidate_rows:
+        if row["classification"] != "artifact" and desired.get(row["path"]) != expected_current.get(row["path"]):
+            raise PublisherError(f"File extra alterato nel candidato: {row['path']}.")
+    expected_removed = sorted(({"path": path, "sha256": expected_current[path]["sha256"]}
+                               for path in set(expected_current) - set(desired)),
+                              key=lambda row: row["path"])
+    approvals = sorted((dict(row) for row in approved_removals), key=lambda row: row.get("path", ""))
+    if approvals != expected_removed:
+        raise PublisherError("Rimozioni non approvate o approvazione non esatta.")
+
+    target_fd = os.open(target_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    written = []
+    try:
+        # Prima si installano i nuovi file statici/hashati; poi plugin e tema.
+        # Così i riferimenti ai bundle già serviti restano disponibili durante
+        # l'aggiornamento del markup. Le sostituzioni dei singoli file sono atomiche.
+        def rank(path):
+            if "/assets/dist/" in f"/{path}/" or "/assets/images/" in f"/{path}/":
+                return 0
+            if path.startswith("plugins/sarafatto-core/"):
+                return 1
+            return 2
+
+        changed = [path for path in sorted(set(desired) & set(source_records))
+                   if desired[path] != expected_current.get(path)]
+        added = [path for path in desired if path not in expected_current]
+        for relative in sorted(added + changed, key=lambda value: (rank(value), value)):
+            source_parts = _target_path_parts(relative)
+            source_path = source_root.joinpath(*source_parts)
+            source_info = source_path.lstat()
+            source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+            parent_fd, name = _open_target_parent(target_fd, relative, create=True)
+            temp_name = ".sf-new-" + uuid.uuid4().hex
+            temp_fd = None
+            try:
+                source_opened = os.fstat(source_fd)
+                if (not stat.S_ISREG(source_opened.st_mode) or source_opened.st_nlink != 1
+                        or (source_opened.st_dev, source_opened.st_ino) != (source_info.st_dev, source_info.st_ino)):
+                    raise PublisherError(f"Sorgente sostituita durante l'applicazione: {relative}.")
+                temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                  0o600, dir_fd=parent_fd)
+                digest = hashlib.sha256()
+                count = 0
+                while True:
+                    block = os.read(source_fd, 1024 * 1024)
+                    if not block:
+                        break
+                    digest.update(block)
+                    count += len(block)
+                    view = memoryview(block)
+                    while view:
+                        written_bytes = os.write(temp_fd, view)
+                        if written_bytes <= 0:
+                            raise PublisherError(f"Scrittura incompleta: {relative}.")
+                        view = view[written_bytes:]
+                if (digest.hexdigest() != desired[relative]["sha256"]
+                        or count != desired[relative]["size"]):
+                    raise PublisherError(f"SHA sorgente non corrispondente: {relative}.")
+                os.fchmod(temp_fd, int(desired[relative]["mode"], 8))
+                if relative in expected_current:
+                    current_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if stat.S_ISLNK(current_info.st_mode) or not stat.S_ISREG(current_info.st_mode) or current_info.st_nlink != 1:
+                        raise PublisherError(f"Destinazione non regolare o hard link: {relative}.")
+                    os.fchown(temp_fd, current_info.st_uid, current_info.st_gid)
+                os.fsync(temp_fd)
+                os.close(temp_fd)
+                temp_fd = None
+                if relative in expected_current:
+                    os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                else:
+                    os.link(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                            follow_symlinks=False)
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+                written.append(relative)
+                if fault_hook:
+                    fault_hook("after-file", relative, len(written))
+            finally:
+                if temp_fd is not None:
+                    os.close(temp_fd)
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                os.close(source_fd)
+                os.close(parent_fd)
+
+        for approval in approvals:
+            relative = approval["path"]
+            parent_fd, name = _open_target_parent(target_fd, relative)
+            try:
+                actual = _hash_at(parent_fd, name)
+                if actual["sha256"] != approval["sha256"]:
+                    raise PublisherError(f"File cambiato prima della rimozione approvata: {relative}.")
+                os.unlink(name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+                written.append(relative)
+                if fault_hook:
+                    fault_hook("after-file", relative, len(written))
+            finally:
+                os.close(parent_fd)
+        final = inventory_target_tree(target_root)
+        if final != desired:
+            raise PublisherError("Inventario target finale diverso dal candidato.")
+        return {"written": written, "inventory": final, "public_writes_performed": bool(written),
+                "atomicity": "per-file-only; release can be mixed during operation"}
+    finally:
+        os.close(target_fd)
+
+
+def recover_file_snapshot(backup_root, target_root, parent_rows, candidate_rows, *, fault_hook=None):
+    """Riconcilia un'operazione interrotta solo se ogni file è parent o candidato.
+
+    Qualunque hash terzo, symlink, extra non registrato o file speciale blocca il
+    recovery. Il ripristino usa il backup verificato già estratto in area privata.
+    """
+    actual = inventory_target_tree(target_root)
+    parent = {row["path"]: row for row in parent_rows}
+    candidate = {row["path"]: row for row in candidate_rows}
+    allowed_paths = set(parent) | set(candidate)
+    if set(actual) - allowed_paths:
+        raise PublisherError("Recovery bloccato: file live fuori dai due snapshot autorizzati.")
+    for path, current in actual.items():
+        allowed_hashes = {snapshot[path]["sha256"] for snapshot in (parent, candidate) if path in snapshot}
+        if current["sha256"] not in allowed_hashes:
+            raise PublisherError(f"Recovery bloccato: hash live estraneo ai due snapshot: {path}.")
+    current_rows = []
+    for path, row in actual.items():
+        classification = (parent.get(path) or candidate[path]).get("classification", "artifact")
+        current_rows.append({"path": path, **row, "classification": classification})
+    removals = [{"path": path, "sha256": actual[path]["sha256"]}
+                for path in sorted(set(actual) - set(parent))]
+    return apply_file_snapshot(backup_root, target_root, current_rows, parent_rows,
+                               approved_removals=removals, fault_hook=fault_hook)
+
+
+def rollback_file_snapshot(verified_backup_root, target_root, current_rows, target_rows, *,
+                           fault_hook=None):
+    """Ripristina uno snapshot già estratto e verificato dal backup applicativo."""
+    current = {row["path"]: row for row in current_rows}
+    target = {row["path"]: row for row in target_rows}
+    removals = [{"path": path, "sha256": current[path]["sha256"]}
+                for path in sorted(set(current) - set(target))]
+    return apply_file_snapshot(verified_backup_root, target_root, current_rows, target_rows,
+                               approved_removals=removals, fault_hook=fault_hook)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def production_health_check(*, urls=("https://sara-fatto.it/", "https://sara-fatto.it/wp-json/"),
+                            opener=None, timeout=12):
+    """Health check HTTP read-only: HTTPS, host vincolato, 2xx e body non-manutenzione."""
+    from urllib.parse import urlsplit
+    if not urls or len(urls) > 5:
+        raise PublisherError("Health check richiede da uno a cinque URL espliciti.")
+    client = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(), _NoRedirect())
+    checks = []
+    for url in urls:
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or parsed.hostname not in {"sara-fatto.it", "www.sara-fatto.it"}
+                or parsed.username or parsed.password or parsed.port not in (None, 443)
+                or parsed.query or parsed.fragment):
+            raise PublisherError("URL health check fuori dagli endpoint HTTPS autorizzati.")
+        request = urllib.request.Request(url, headers={
+            "Cache-Control": "no-cache, no-store", "Pragma": "no-cache",
+            "User-Agent": "Sarafatto-Release-Health/1",
+        })
+        try:
+            response = client.open(request, timeout=timeout)
+            with response:
+                status = getattr(response, "status", 200)
+                body = response.read(2 * 1024 * 1024 + 1)
+                final_url = response.geturl()
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+            raise PublisherError(f"Health check HTTP non riuscito per {parsed.path or '/'}.") from exc
+        final = urlsplit(final_url)
+        if (status < 200 or status >= 300 or not body or len(body) > 2 * 1024 * 1024
+                or final.scheme != "https" or final.hostname not in {"sara-fatto.it", "www.sara-fatto.it"}
+                or b"Briefly unavailable for scheduled maintenance" in body
+                or b"X-Sarafatto-Deploy-Barrier" in body):
+            raise PublisherError(f"Health check HTTP non valido per {parsed.path or '/'}.")
+        checks.append({"url": url, "status": status, "body_sha256": hashlib.sha256(body).hexdigest(),
+                       "bytes": len(body)})
+    return {"status": "healthy", "checks": checks, "checked_at_utc":
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")}
+
+
+def publish_filesystem_snapshot(source_root, target_root, current_rows, candidate_rows, *,
+                                approved_removals=(), health_check, fault_hook=None,
+                                recovery_root=None):
+    """Pubblica file reali e fa rollback automatico se health check fallisce.
+
+    `recovery_root` deve essere l'estrazione già verificata del backup pre-deploy.
+    La funzione non dichiara atomicità multi-file: ogni file è sostituito
+    atomicamente, mentre le richieste concorrenti possono vedere stati misti.
+    """
+    if not callable(health_check):
+        raise PublisherError("Health check obbligatorio.")
+    applied = apply_file_snapshot(source_root, target_root, current_rows, candidate_rows,
+                                  approved_removals=approved_removals, fault_hook=fault_hook)
+    try:
+        evidence = health_check()
+        if not isinstance(evidence, dict) or evidence.get("status") != "healthy":
+            raise PublisherError("Health check post-pubblicazione non superato.")
+        digest = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+                                .encode("utf-8")).hexdigest()
+        final = inventory_target_tree(target_root)
+        expected = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                    for row in candidate_rows}
+        if final != expected:
+            raise PublisherError("Inventario live variato dopo l'health check.")
+        return {**applied, "status": "files-and-health-verified", "health_evidence": evidence,
+                "health_evidence_sha256": digest}
+    except Exception as exc:
+        if recovery_root is None:
+            raise PublisherError(f"Pubblicazione applicata ma health check fallito; recovery necessario: {exc}") from exc
+        try:
+            recover_file_snapshot(recovery_root, target_root, current_rows, candidate_rows)
+        except Exception as rollback_exc:
+            raise PublisherError(f"Health check fallito e rollback automatico non verificato: {rollback_exc}") from exc
+        raise PublisherError(f"Health check fallito; rollback al parent completato e verificato: {exc}") from exc
+
+
+def _load_verified_current_state(expected_state_sha256):
+    """Rilegge stato, journal e inventari con i descriptor privati e il lock CLI."""
+    private = None
+    lock_fd = None
+    try:
+        private = backup_tool.open_private_directories(PRIVATE_ROOT, PRIVATE_ROOT)
+        lock_fd = baseline_tool.acquire_baseline_lock(None, private["locks_fd"])
+        state = release_state_tool.load_current_state(
+            private["state_fd"], production_adapter.BASELINE_SHA256)
+        events = release_state_tool.read_journal_at(private["state_fd"])
+        release_state_tool.validate_current_state_journal(state, events)
+        if state["state_sha256"] != expected_state_sha256:
+            raise PublisherError("current-release è cambiato dopo l'ispezione iniziale.")
+        tool_commit = state["release"]["inventory_tool_commit"]
+        fresh = (baseline_tool.acquire_fresh_inventory(tool_commit),
+                 baseline_tool.acquire_fresh_inventory(tool_commit))
+        release_state_tool.validate_fresh_release_inventories(state, fresh)
+        return state
+    except (backup_tool.BackupError, baseline_tool.BaselineError,
+            release_state_tool.ReleaseStateError, OSError) as exc:
+        raise PublisherError(f"Stato release non verificabile per il piano: {exc}") from exc
+    finally:
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if private is not None:
+            backup_tool.close_private_directories(private)
+
+
 def build_preflight(package_root, inventory_path, release_sha, *, provenance_path,
                     archive_path, expected_run_id):
     """Confronta candidato, commit server e live; non scrive alcun file."""
@@ -433,16 +874,26 @@ def build_preflight(package_root, inventory_path, release_sha, *, provenance_pat
         blockers.append("Drift live rispetto a current-release: pubblicazione rifiutata.")
     changes, retained, diff_blockers = plan_inventory_changes(records, live, reference)
     blockers.extend(diff_blockers)
-    # L'implementazione non ha ancora un writer verificato per journal/current-state
-    # né prova uniforme OPcache: queste condizioni non sono trasformabili in flag.
+    release_plan = None
+    current = inspection.get("current_release")
+    if current and current.get("state_sha256"):
+        current_state = _load_verified_current_state(current["state_sha256"])
+        operation_id = "plan-" + uuid.uuid4().hex
+        try:
+            release_plan = make_release_state_plan(current_state, records, operation_id)
+        except release_state_tool.ReleaseStateError as exc:
+            blockers.append(f"Piano release non autorizzabile: {exc}")
+    # Il piano è soltanto una fotografia read-only; non equivale a una
+    # transazione journalizzata né a un'autorizzazione di scrittura.
     blockers.append("Scritture pubbliche disabilitate: barriera HTTP/PHP e OPcache da collaudare su IONOS.")
-    blockers.append("Writer transazionale di produzione non abilitato; nessuna modifica pubblica consentita.")
+    blockers.append("Writer multi-file non abilitato: mancano prova di drain PHP-FPM e adozione uniforme OPcache.")
     return {
         "status": "blocked" if blockers else "ready",
         "release_sha": release_sha,
         "artifact_files": len(records),
         "live_files": len(live),
         "changes": changes,
+        "release_plan": release_plan,
         "retained_live_extras": retained,
         "blockers": blockers,
         "public_writes_performed": False,

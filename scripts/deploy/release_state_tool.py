@@ -39,6 +39,7 @@ OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 OPERATION_STATES = (
     "prepared", "backup_verified", "publishing", "files_verified",
     "health_verified", "committed", "recovery_required",
+    "recovery_completed",
     "component_migrated", "component_rolled_back", "release_committed",
     "release_rolled_back",
 )
@@ -934,7 +935,7 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
                               "release_rolled_back", "recovery_required"}),
         "committed": set(), "component_migrated": set(), "component_rolled_back": set(),
         "release_committed": set(), "release_rolled_back": set(),
-        "recovery_required": set(),
+        "recovery_required": {"recovery_completed"}, "recovery_completed": set(),
     }
     for number, line in enumerate(raw.splitlines(), 1):
         event = _read_json(line, f"journal riga {number}")
@@ -1002,6 +1003,15 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
                                        "parent_document_sha256", "final_inventory_sha256",
                                        "health_evidence_sha256", "entry_sha256"))):
                 raise ReleaseStateError("Evento terminale release non autorizzato o incompleto.")
+        if status == "recovery_completed":
+            details = event["details"]
+            required = {"backup_id", "backup_manifest_sha256", "parent_state_sha256",
+                        "restored_inventory_sha256", "health_evidence_sha256"}
+            if (set(details) != required or not BACKUP_ID_RE.fullmatch(str(details.get("backup_id", "")))
+                    or any(not re.fullmatch(r"[a-f0-9]{64}", str(details.get(key, "")))
+                           for key in ("backup_manifest_sha256", "parent_state_sha256",
+                                       "restored_inventory_sha256", "health_evidence_sha256"))):
+                raise ReleaseStateError("Evento recovery_completed incompleto o non valido.")
         if journal_operation_id is None:
             journal_operation_id = operation_id
         elif operation_id != journal_operation_id:
@@ -1011,7 +1021,7 @@ def read_journal_at(state_fd, *, allow_fixture_committed=False):
                 and status == "prepared"
                 and event["details"].get("rollback_of") == journal_operation_id
             )
-            completed = previous_status in ("committed", "component_rolled_back",
+            completed = previous_status in ("committed", "component_rolled_back", "recovery_completed",
                                             "release_committed", "release_rolled_back")
             if not completed and not completed_by_rollback:
                 raise ReleaseStateError("Journal con operazioni intercalate o ID duplicati non consentiti.")
@@ -1030,7 +1040,7 @@ def unresolved_operation(events, *, allow_fixture_committed=False, allow_applica
     for event in events:
         operation_id = event["operation_id"]
         if event["status"] in ("committed", "component_migrated", "component_rolled_back",
-                                "release_committed", "release_rolled_back"):
+                                "release_committed", "release_rolled_back", "recovery_completed"):
             if event["status"] == "committed":
                 if (not allow_fixture_committed or event.get("details", {}).get("fixture_only") is not True):
                     raise ReleaseStateError("Evento committed rifiutato: nessun verificatore fixture autorizzato.")
@@ -1052,7 +1062,7 @@ def unresolved_operation(events, *, allow_fixture_committed=False, allow_applica
         )
 
 
-def append_operation_event(state_fd, locks_fd, operation_id, status, details):
+def append_operation_event(state_fd, locks_fd, operation_id, status, details, *, lock_fd=None):
     """Aggiunge un evento sotto site-operation.lock; non pubblica né committa release."""
     if not OPERATION_ID_RE.fullmatch(str(operation_id)) or status not in OPERATION_STATES:
         raise ReleaseStateError("ID o stato operazione non validi.")
@@ -1065,7 +1075,9 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
         raise ReleaseStateError("Dettagli evento non validi.")
     if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
         raise ReleaseStateError("Journal richiede openat/O_NOFOLLOW POSIX.")
-    lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+    owned_lock = lock_fd is None
+    if owned_lock:
+        lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
     try:
         events = read_journal_at(state_fd)
         active = {}
@@ -1080,6 +1092,7 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
             "publishing": {"files_verified", "recovery_required"},
             "files_verified": {"health_verified", "recovery_required"},
             "health_verified": {"recovery_required"},
+            "recovery_required": set(),
         }
         if status not in transitions.get(prior_status, set()):
             raise ReleaseStateError(f"Transizione journal non consentita: {prior_status} -> {status}.")
@@ -1106,8 +1119,9 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details):
         finally:
             os.close(fd)
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if owned_lock:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 def load_current_state(state_fd, expected_baseline_sha=None):
@@ -1219,22 +1233,35 @@ def validate_application_release_journal(state, events):
             "parent_inventory_sha256": entry["parent_inventory_sha256"],
             "parent_state_sha256": entry["parent_state_sha256"],
             "parent_document_sha256": entry["parent_document_sha256"],
-            "final_inventory_sha256": entry["inventory_sha256"],
             "plan": entry["plan"], "entry_sha256": entry["entry_sha256"],
         }
+        # I writer reali devono poter journalizzare l'intento prima di modificare
+        # il filesystem. L'inventario finale e l'entry hash sono noti soltanto
+        # dopo le scritture e l'health check; il journal storico delle fixture
+        # può ancora includerli nell'evento prepared.
+        production_prepared = dict(expected_prepared)
+        production_prepared.pop("entry_sha256")
+        legacy_prepared = dict(expected_prepared)
+        legacy_prepared["final_inventory_sha256"] = entry["inventory_sha256"]
         backup_details = operation[1]["details"]
         expected_backup = {"backup_id": entry["backup"]["backup_id"],
                            "manifest_sha256": entry["backup"]["manifest_sha256"],
                            "release_id": entry["backup"]["release_id"],
                            "inventory_sha256": entry["backup"]["inventory_sha256"],
                            "baseline_sha256": entry["backup"]["baseline_sha256"]}
-        if (prepared != expected_prepared or backup_details != expected_backup
-                or operation[2]["details"] != {"entry_sha256": entry["entry_sha256"],
-                                                "plan_sha256": entry["plan_sha256"]}
-                or operation[3]["details"] != {"entry_sha256": entry["entry_sha256"],
-                                                "final_inventory_sha256": entry["inventory_sha256"]}
-                or operation[4]["details"] != {"entry_sha256": entry["entry_sha256"],
-                                                "health_evidence_sha256": entry["health_evidence_sha256"]}):
+        if (prepared not in (legacy_prepared, expected_prepared, production_prepared)
+                or backup_details != expected_backup
+                or operation[2]["details"] not in (
+                    {"entry_sha256": entry["entry_sha256"], "plan_sha256": entry["plan_sha256"]},
+                    {"plan_sha256": entry["plan_sha256"]})
+                or operation[3]["details"] not in (
+                    {"entry_sha256": entry["entry_sha256"],
+                     "final_inventory_sha256": entry["inventory_sha256"]},
+                    {"final_inventory_sha256": entry["inventory_sha256"]})
+                or operation[4]["details"] not in (
+                    {"entry_sha256": entry["entry_sha256"],
+                     "health_evidence_sha256": entry["health_evidence_sha256"]},
+                    {"health_evidence_sha256": entry["health_evidence_sha256"]})):
             raise ReleaseStateError("Dettagli intermedi del journal non concordano con la transazione release.")
     expected_terminal_ops = {entry["operation_id"] for entry in chain["entries"]}
     journal_release_order = [event["operation_id"] for event in events
@@ -1248,6 +1275,104 @@ def validate_application_release_journal(state, events):
         raise ReleaseStateError("Journal contiene terminali release assenti dalla catena current-release.")
     unresolved_operation(events, allow_application_release=True)
     return True
+
+
+def append_verified_application_terminal(candidate, expected_parent_state_sha256, *,
+                                         private_root=PRIVATE_ROOT, expected_root=PRIVATE_ROOT,
+                                         inventory_reader=None):
+    """Append release terminal soltanto dopo aver verificato candidato, parent e live.
+
+    È l'unico percorso produttivo che può scrivere release_committed o
+    release_rolled_back. L'evento viene aggiunto prima della promozione atomica
+    current-release: un crash nella finestra intermedia lascia lo stato incoerente
+    e quindi bloccato, mai falsamente valido.
+    """
+    if pathlib.Path(private_root) != pathlib.Path(expected_root):
+        raise ReleaseStateError("Root privata diversa dal percorso atteso.")
+    if (fcntl is None or os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or os.open not in os.supports_dir_fd):
+        raise ReleaseStateError("Conferma release richiede POSIX, flock e openat/O_NOFOLLOW.")
+    candidate = validate_state_document(candidate)
+    if candidate["schema_version"] != APPLICATION_STATE_SCHEMA:
+        raise ReleaseStateError("Terminale disponibile soltanto per release applicative.")
+    chain = candidate["release_chain"]
+    if not chain["entries"]:
+        raise ReleaseStateError("Nessuna entry applicativa da confermare.")
+    entry = chain["entries"][-1]
+    status = "release_committed" if entry["operation_kind"] == "publish" else "release_rolled_back"
+    root_fd = os.open(private_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    state_fd = locks_fd = lock_fd = None
+    try:
+        state_fd = _open_dir(root_fd, "state")
+        locks_fd = _open_dir(root_fd, "locks")
+        lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+        current = load_current_state(state_fd, candidate["initial_baseline"]["sha256"])
+        if current["state_sha256"] != expected_parent_state_sha256:
+            raise ReleaseStateError("current-release parent cambiato; terminale rifiutato.")
+        entries = current.get("release_chain", {}).get("entries", [])
+        if (len(chain["entries"]) != len(entries) + 1
+                or chain["entries"][:-1] != entries
+                or entry["parent_document_sha256"] != current["state_sha256"]
+                or entry["parent_release_id"] != current["release"]["release_id"]
+                or entry["parent_inventory_sha256"] != current["inventory_sha256"]):
+            raise ReleaseStateError("Entry candidata non è la prossima transizione del parent corrente.")
+        reader = inventory_reader or baseline.acquire_fresh_inventory
+        tool_commit = candidate["release"]["inventory_tool_commit"]
+        validate_fresh_release_inventories(candidate, (reader(tool_commit), reader(tool_commit)))
+        events = read_journal_at(state_fd)
+        operation = [event for event in events if event["operation_id"] == entry["operation_id"]]
+        required = ["prepared", "backup_verified", "publishing", "files_verified", "health_verified"]
+        if [event["status"] for event in operation] != required:
+            raise ReleaseStateError("Transazione non ha completato tutti i controlli prima del terminale.")
+        terminal_details = {
+            "operation_kind": entry["operation_kind"], "release_id": entry["release_id"],
+            "commit_sha": entry["commit_sha"], "artifact_sha256": entry["artifact_sha256"],
+            "plan_sha256": entry["plan_sha256"], "backup_id": entry["backup"]["backup_id"],
+            "backup_manifest_sha256": entry["backup"]["manifest_sha256"],
+            "parent_release_id": entry["parent_release_id"],
+            "parent_inventory_sha256": entry["parent_inventory_sha256"],
+            "parent_state_sha256": entry["parent_state_sha256"],
+            "parent_document_sha256": entry["parent_document_sha256"],
+            "final_inventory_sha256": entry["inventory_sha256"],
+            "health_evidence_sha256": entry["health_evidence_sha256"],
+            "entry_sha256": entry["entry_sha256"],
+        }
+        event = {"operation_id": entry["operation_id"], "status": status,
+                 "timestamp_utc": utc_now(), "details": terminal_details,
+                 "previous_event_sha256": events[-1]["event_sha256"] if events else "0" * 64}
+        event["event_sha256"] = digest_json(event)
+        validate_application_release_journal(candidate, events + [event])
+        payload = json.dumps(event, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8") + b"\n"
+        fd = os.open(JOURNAL_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                     0o600, dir_fd=state_fd)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_size + len(payload) > MAX_JOURNAL_BYTES):
+                raise ReleaseStateError("Journal non sicuro o oltre il limite.")
+            if os.write(fd, payload) != len(payload):
+                raise ReleaseStateError("Scrittura evento terminale incompleta.")
+            os.fsync(fd)
+            os.fsync(state_fd)
+        finally:
+            os.close(fd)
+        return {"status": status, "operation_id": entry["operation_id"],
+                "entry_sha256": entry["entry_sha256"]}
+    except (OSError, baseline.BaselineError) as exc:
+        if isinstance(exc, ReleaseStateError):
+            raise
+        raise ReleaseStateError(f"Conferma terminale fallita: {exc}") from exc
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if locks_fd is not None:
+            os.close(locks_fd)
+        if state_fd is not None:
+            os.close(state_fd)
+        os.close(root_fd)
 
 
 def validate_current_state_journal(state, events):
