@@ -668,6 +668,7 @@ class BackupToolTests(unittest.TestCase):
         current_state_path.chmod(0o600)
         with self.assertRaisesRegex(backup_tool.BackupError, "fotografia iniziale verificata"):
             self.create(backup_id="20261024T120011Z-abcdef123459")
+        self.assertFalse((self.backups / "20261024T120011Z-abcdef123459").exists())
         current_state_path.write_bytes(trusted_state)
         current_state_path.chmod(0o600)
         state_fd = os.open(self.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

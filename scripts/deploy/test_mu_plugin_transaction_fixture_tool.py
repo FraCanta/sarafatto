@@ -9,7 +9,6 @@ import sys
 import threading
 import unittest
 from unittest import mock
-from unittest import mock
 
 import test_transaction_fixture_tool as base_tests
 
@@ -81,6 +80,14 @@ class MuPluginMigrationStateSchemaTests(unittest.TestCase):
     def test_state_non_consente_promozione_arbitraria_alla_release_candidata(self):
         state = self.state_document()
         state["release"]["commit_sha"] = migration.SOURCE_COMMIT
+        state.pop("state_sha256")
+        state["state_sha256"] = migration.state_tool.digest_json(state)
+        with self.assertRaises(migration.state_tool.ReleaseStateError):
+            migration.state_tool.validate_state_document(state, "a" * 64)
+
+    def test_state_rifiuta_delta_mu_non_autorizzato(self):
+        state = self.state_document()
+        state["component_migration"]["new_sha256"] = "0" * 64
         state.pop("state_sha256")
         state["state_sha256"] = migration.state_tool.digest_json(state)
         with self.assertRaises(migration.state_tool.ReleaseStateError):

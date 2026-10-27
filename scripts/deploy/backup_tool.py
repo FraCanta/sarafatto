@@ -480,7 +480,10 @@ def backup_reference(state_fd, baseline_document, baseline_digest, baseline_comm
         )
     if migration is None:
         if current_snapshot != expected_snapshot or current_inventory_files != expected_inventory:
-            raise BackupError("Stato current-release iniziale diverso dalla baseline.")
+            raise BackupError(
+                "Lo stato current-release non è una fotografia iniziale verificata della baseline "
+                "né una transizione MU-plugin autorizzata."
+            )
     else:
         # Il validatore dello stato consente unicamente la migrazione MU-plugin
         # fissata e verifica digest, backup, commit e hash del target.
