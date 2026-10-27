@@ -163,6 +163,11 @@ class ProductionArtifactTests(unittest.TestCase):
         candidate_content = dict(self.contents)
         candidate_content.update({path: parent_content[path] for path in extra_classes})
         candidate_rows = self._rows_from_content(candidate_content, extra_classes)
+        # La fixture rimuove intenzionalmente obsolete.php: la pubblicazione
+        # interrotta deve ricevere la stessa approvazione esplicita path+SHA
+        # richiesta a una pubblicazione completata.
+        obsolete_sha = hashlib.sha256(parent_content["themes/sarafatto/obsolete.php"]).hexdigest()
+        removal_approval = [{"path": "themes/sarafatto/obsolete.php", "sha256": obsolete_sha}]
         counter = {"writes": 0}
 
         def interrupt(event, path, count):
@@ -172,6 +177,7 @@ class ProductionArtifactTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "fault injection"):
             publisher.apply_file_snapshot(self.package, target, parent_rows, candidate_rows,
+                                           approved_removals=removal_approval,
                                            fault_hook=interrupt)
         self.assertEqual(counter["writes"], 2)
         before_recovery = publisher.inventory_target_tree(target)
@@ -179,6 +185,7 @@ class ProductionArtifactTests(unittest.TestCase):
                                                for row in parent_rows})
         recovered = publisher.recover_file_snapshot(backup, target, parent_rows, candidate_rows)
         self.assertEqual(recovered["inventory"], publisher.inventory_target_tree(backup))
+        self.assertTrue((target / "themes/sarafatto/obsolete.php").is_file())
         for path in extra_classes:
             self.assertEqual(target.joinpath(*path.split("/")).read_bytes(), parent_content[path])
 
@@ -222,6 +229,59 @@ class ProductionArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(publisher.PublisherError, "Inventario target cambiato"):
             publisher.apply_file_snapshot(self.package, target, parent_rows, candidate_rows,
                                           approved_removals=[])
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Il writer dir_fd/O_NOFOLLOW si valida obbligatoriamente su Ubuntu CI.")
+    def test_filesystem_add_collisione_non_sovrascrive_e_symlink_bloccato(self):
+        target = self.root / "wp-content-collision"
+        target.mkdir()
+        parent_content = self._fake_wp_a(target)
+        extras = {
+            **{f"themes/sarafatto/assets/dist/assets/app-old{index:02d}.js": "retained-vite-bundle"
+               for index in range(8)},
+            "plugins/sarafatto-core/includes/home-hero.php.bak": "retained-backup",
+        }
+        parent_rows = self._rows_from_content(parent_content, extras)
+        candidate_content = dict(self.contents)
+        candidate_content.update({path: parent_content[path] for path in extras})
+        candidate_rows = self._rows_from_content(candidate_content, extras)
+        removal_approval = [{
+            "path": "themes/sarafatto/obsolete.php",
+            "sha256": hashlib.sha256(parent_content["themes/sarafatto/obsolete.php"]).hexdigest(),
+        }]
+
+        real_link = os.link
+
+        def create_racing_collision(source, destination, *, src_dir_fd=None, dst_dir_fd=None,
+                                    follow_symlinks=True):
+            if destination == "chunk-0.js":
+                fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                             dir_fd=dst_dir_fd)
+                try:
+                    os.write(fd, b"concurrent unapproved file")
+                finally:
+                    os.close(fd)
+            return real_link(source, destination, src_dir_fd=src_dir_fd,
+                             dst_dir_fd=dst_dir_fd, follow_symlinks=follow_symlinks)
+
+        with mock.patch.object(publisher.os, "link", side_effect=create_racing_collision):
+            with self.assertRaisesRegex(publisher.PublisherError, "Destinazione nuova già esistente"):
+                publisher.apply_file_snapshot(
+                    self.package, target, parent_rows, candidate_rows,
+                    approved_removals=removal_approval)
+        collision = target / "themes/sarafatto/assets/dist/assets/chunk-0.js"
+        self.assertEqual(collision.read_bytes(), b"concurrent unapproved file")
+
+        symlink_target = self.root / "wp-content-symlink"
+        symlink_target.mkdir()
+        self._fake_wp_a(symlink_target)
+        managed_file = symlink_target / "themes/sarafatto/functions.php"
+        managed_file.unlink()
+        outside = self.root / "outside-functions.php"
+        outside.write_bytes(b"must not be followed")
+        managed_file.symlink_to(outside)
+        with self.assertRaisesRegex(publisher.PublisherError, "Symlink nel perimetro gestito"):
+            publisher.inventory_target_tree(symlink_target)
 
     def test_artifact_ammesso_solo_con_manifest_e_inventario_coerenti(self):
         records = self._verify()

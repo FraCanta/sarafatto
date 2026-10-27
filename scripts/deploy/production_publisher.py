@@ -642,9 +642,13 @@ def apply_file_snapshot(source_root, target_root, current_rows, candidate_rows, 
                 return 1
             return 2
 
-        changed = [path for path in sorted(set(desired) & set(source_records))
-                   if desired[path] != expected_current.get(path)]
-        added = [path for path in desired if path not in expected_current]
+        # Le aggiunte e le sostituzioni devono essere insiemi disgiunti:
+        # un file nuovo non deve comparire anche in `changed` solo perché
+        # expected_current.get(path) restituisce None.
+        artifact_paths = set(desired) & set(source_records)
+        changed = [path for path in sorted(artifact_paths & set(expected_current))
+                   if desired[path] != expected_current[path]]
+        added = sorted(artifact_paths - set(expected_current))
         for relative in sorted(added + changed, key=lambda value: (rank(value), value)):
             source_parts = _target_path_parts(relative)
             source_path = source_root.joinpath(*source_parts)
@@ -678,19 +682,40 @@ def apply_file_snapshot(source_root, target_root, current_rows, candidate_rows, 
                         or count != desired[relative]["size"]):
                     raise PublisherError(f"SHA sorgente non corrispondente: {relative}.")
                 os.fchmod(temp_fd, int(desired[relative]["mode"], 8))
+                current_identity = None
                 if relative in expected_current:
                     current_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                    if stat.S_ISLNK(current_info.st_mode) or not stat.S_ISREG(current_info.st_mode) or current_info.st_nlink != 1:
+                    if (stat.S_ISLNK(current_info.st_mode) or not stat.S_ISREG(current_info.st_mode)
+                            or current_info.st_nlink != 1):
                         raise PublisherError(f"Destinazione non regolare o hard link: {relative}.")
+                    current_identity = (current_info.st_dev, current_info.st_ino)
+                    current_record = _hash_at(parent_fd, name)
+                    if {key: current_record[key] for key in ("sha256", "size", "mode")} != expected_current[relative]:
+                        raise PublisherError(f"Destinazione modificata prima della sostituzione: {relative}.")
                     os.fchown(temp_fd, current_info.st_uid, current_info.st_gid)
                 os.fsync(temp_fd)
                 os.close(temp_fd)
                 temp_fd = None
                 if relative in expected_current:
+                    # Ricontrollo immediatamente prima del rename. Il lock
+                    # serializza i writer cooperanti; il controllo d'identità
+                    # rileva sostituzioni esterne avvenute durante lo staging.
+                    latest_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (not stat.S_ISREG(latest_info.st_mode) or latest_info.st_nlink != 1
+                            or (latest_info.st_dev, latest_info.st_ino) != current_identity):
+                        raise PublisherError(f"Destinazione sostituita durante lo staging: {relative}.")
+                    latest_record = _hash_at(parent_fd, name)
+                    if {key: latest_record[key] for key in ("sha256", "size", "mode")} != expected_current[relative]:
+                        raise PublisherError(f"Destinazione modificata durante lo staging: {relative}.")
                     os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                 else:
-                    os.link(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-                            follow_symlinks=False)
+                    try:
+                        # hard-link nello stesso parent: creazione atomica
+                        # senza sostituire una destinazione apparsa nel frattempo.
+                        os.link(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                                follow_symlinks=False)
+                    except FileExistsError as exc:
+                        raise PublisherError(f"Destinazione nuova già esistente: {relative}.") from exc
                     os.unlink(temp_name, dir_fd=parent_fd)
                 os.fsync(parent_fd)
                 written.append(relative)
