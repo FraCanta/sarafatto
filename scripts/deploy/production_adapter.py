@@ -362,14 +362,14 @@ def inspect_production_state(authorized_sha=None, *, toolchain_sha256=None):
             }
         backup_tool.compare_inventory_to_baseline(second_files, [], second_exclusion, live_reference)
 
-        journal = release_state_tool.read_journal_at(state_fd)
         try:
+            journal = release_state_tool.read_journal_at(state_fd)
             if current_state is not None:
                 release_state_tool.validate_current_state_journal(current_state, journal)
             else:
                 release_state_tool.unresolved_operation(journal)
         except release_state_tool.ReleaseStateError as exc:
-            raise ProductionAdapterError(f"Journal con operazione irrisolta: {exc}") from exc
+            raise ProductionAdapterError(f"Journal non verificabile o con operazione irrisolta: {exc}") from exc
         if current_state is not None:
             live_digest = release_state_tool.inventory_digest_json(second_inventory)
             if live_digest != state_inventory_digest:
