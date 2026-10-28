@@ -66,7 +66,7 @@ jobs:
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_release_state_tool.py
           SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_application_release_state.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_transaction_fixture_tool.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
+          SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_adapter.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_production_publisher.py
           SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_artifact_transfer_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_http_php_release_probe.py
@@ -140,6 +140,43 @@ jobs:
             --release-sha "$GITHUB_SHA" --package "$PACKAGE_DIR" \
             --inventory "$RUNNER_TEMP/sarafatto-inventory.tsv" --provenance "$provenance" \
             --archive "$archive" --run-id "$GITHUB_RUN_ID"
+      - name: Prepara toolchain privata revisionabile senza installarla
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, sys
+          sys.path.insert(0, 'scripts/deploy')
+          import artifact_transfer_tool
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'sarafatto-toolchain'
+          target = root / 'scripts/deploy'
+          target.mkdir(parents=True, mode=0o700)
+          report = artifact_transfer_tool.toolchain_contract()
+          for row in report['contract']['files']:
+              source = pathlib.Path('scripts/deploy') / row['file']
+              payload = source.read_bytes()
+              if hashlib.sha256(payload).hexdigest() != row['sha256']:
+                  raise SystemExit('Toolchain cambiata durante il packaging')
+              destination = target / row['file']
+              shutil.copyfile(source, destination)
+              destination.chmod(0o600)
+          (root / 'TOOLCHAIN.json').write_text(json.dumps(report, sort_keys=True, indent=2)+'\n', encoding='utf-8')
+          (root / 'SHA256SUMS').write_text(''.join(row['sha256']+'  scripts/deploy/'+row['file']+'\n' for row in report['contract']['files']), encoding='utf-8')
+          PY
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf - -C "$RUNNER_TEMP/sarafatto-toolchain" scripts TOOLCHAIN.json SHA256SUMS | gzip -n > "$RUNNER_TEMP/sarafatto-toolchain.tar.gz"
+          (cd "$RUNNER_TEMP" && sha256sum sarafatto-toolchain.tar.gz > sarafatto-toolchain.tar.gz.sha256)
+      - name: Conserva toolchain e contratto autorizzabili separatamente
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sarafatto-toolchain-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sarafatto-toolchain.tar.gz
+            ${{ runner.temp }}/sarafatto-toolchain.tar.gz.sha256
+            ${{ runner.temp }}/sarafatto-toolchain/TOOLCHAIN.json
+            ${{ runner.temp }}/sarafatto-toolchain/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
       - name: Carica artefatto di sola anteprima
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -155,7 +192,7 @@ jobs:
 
   remote-dry-run:
     needs: [validate, build-artifact]
-    if: inputs.run_remote_dry_run == true
+    if: github.event_name == 'workflow_dispatch' && inputs.run_remote_dry_run == true
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout strumenti di confronto
@@ -213,7 +250,7 @@ jobs:
 
   remote-state-inspection:
     needs: [validate, build-artifact]
-    if: inputs.run_remote_state_inspection == true
+    if: github.event_name == 'workflow_dispatch' && inputs.run_remote_state_inspection == true
     runs-on: ubuntu-24.04
     steps:
       - name: Verifica branch e SHA autorizzato
@@ -224,6 +261,21 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "L'ispezione è consentita solo da main." >&2; exit 1; }
           [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ && "$RELEASE_SHA" == "$GITHUB_SHA" ]] || { echo 'SHA autorizzato non valido o diverso dal dispatch.' >&2; exit 1; }
+      - name: Checkout strumenti autorizzati per ispezione privata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+      - name: Identifica toolchain autorizzata dalla CI
+        id: inspection_toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/artifact_transfer_tool.py toolchain > "$RUNNER_TEMP/sarafatto-inspection-toolchain.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); [print("{}  /home/www/sarafatto-deploy/tools/scripts/deploy/{}".format(f["sha256"],f["file"])) for f in r["contract"]["files"]]' "$RUNNER_TEMP/sarafatto-inspection-toolchain.json" > "$RUNNER_TEMP/sarafatto-inspection-toolchain.sha256"
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["toolchain_sha256"])' "$RUNNER_TEMP/sarafatto-inspection-toolchain.json")"
+          [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
       - name: Installa credenziali SSH effimere
         env:
           SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
@@ -242,7 +294,7 @@ jobs:
           IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
           IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
           IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
-          RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.sha }}
+          TOOLCHAIN_SHA256: ${{ steps.inspection_toolchain.outputs.sha256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -252,13 +304,19 @@ jobs:
           (( IONOS_SSH_PORT >= 1 && IONOS_SSH_PORT <= 65535 ))
           ssh -T -p "$IONOS_SSH_PORT" \
             -i "$RUNNER_TEMP/sarafatto-state-ssh/id_ed25519" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/sarafatto-state-ssh/known_hosts" -o ConnectTimeout=15 \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
+            "sha256sum --strict -c -" < "$RUNNER_TEMP/sarafatto-inspection-toolchain.sha256"
+          ssh -T -p "$IONOS_SSH_PORT" \
+            -i "$RUNNER_TEMP/sarafatto-state-ssh/id_ed25519" \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/sarafatto-state-ssh/known_hosts" \
             -o ConnectTimeout=15 \
             "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
-            "cd /home/www/sarafatto-repo && GIT_OPTIONAL_LOCKS=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/production_adapter.py inspect --authorized-sha '$RELEASE_SHA'"
+            "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-deploy/tools/scripts/deploy/production_adapter.py inspect --toolchain-sha256 '$TOOLCHAIN_SHA256'"
 
   stage-private-artifact:
     needs: [validate, build-artifact]
@@ -320,6 +378,7 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/artifact_transfer_tool.py toolchain > "$RUNNER_TEMP/sarafatto-toolchain.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); [print("{}  /home/www/sarafatto-deploy/tools/scripts/deploy/{}".format(f["sha256"],f["file"])) for f in r["contract"]["files"]]' "$RUNNER_TEMP/sarafatto-toolchain.json" > "$RUNNER_TEMP/sarafatto-toolchain.sha256"
           digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["toolchain_sha256"])' "$RUNNER_TEMP/sarafatto-toolchain.json")"
           [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
           echo "sha256=$digest" >> "$GITHUB_OUTPUT"
@@ -343,6 +402,11 @@ jobs:
           archive_sha256="$(sha256sum "$RUNNER_TEMP/sarafatto-transfer/sarafatto-release.tar.gz" | cut -d ' ' -f 1)"
           inventory_sha256="$(sha256sum "$RUNNER_TEMP/sarafatto-transfer/sarafatto-inventory.tsv" | cut -d ' ' -f 1)"
           provenance_sha256="$(sha256sum "$RUNNER_TEMP/sarafatto-transfer/sarafatto-provenance.json" | cut -d ' ' -f 1)"
+          ssh -T -p "$IONOS_SSH_PORT" -i "$SSH_KEY_FILE" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
+            "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
+            "sha256sum --strict -c -" < "$RUNNER_TEMP/sarafatto-toolchain.sha256"
           ssh -T -p "$IONOS_SSH_PORT" -i "$SSH_KEY_FILE" \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \

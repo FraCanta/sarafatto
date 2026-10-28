@@ -187,7 +187,13 @@ def toolchain_contract():
         if path != directory / name or path.resolve(strict=True) != path:
             raise TransferError(f"Modulo strumenti caricato da un percorso inatteso: {name}.")
         files.append({"file": name, "sha256": production_publisher._artifact_file_digest(path, 10 * 1024 * 1024)})
-    contract = {"schema_version": 1, "transfer_protocol": TRANSFER_PROTOCOL,
+    inventory_script = directory / "baseline-inventory.sh"
+    if inventory_script.resolve(strict=True) != inventory_script:
+        raise TransferError("Script inventario raggiunto tramite symlink.")
+    files.append({"file": "baseline-inventory.sh", "sha256":
+                  production_publisher._artifact_file_digest(inventory_script, 1024 * 1024)})
+    files.sort(key=lambda row: row["file"])
+    contract = {"schema_version": 2, "transfer_protocol": TRANSFER_PROTOCOL,
                 "provenance_schema": 1, "required_entries": list(production_publisher.REQUIRED_ENTRIES),
                 "components": list(production_publisher.ALLOWED_COMPONENTS), "files": files}
     raw = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()

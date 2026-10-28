@@ -247,7 +247,8 @@ class TransferContractTests(unittest.TestCase):
             contract = transfer.toolchain_contract()
             checked = transfer._validate_toolchain(contract["toolchain_sha256"])
         self.assertEqual(checked, contract)
-        self.assertEqual(len(contract["contract"]["files"]), 6)
+        self.assertEqual(len(contract["contract"]["files"]), 7)
+        self.assertIn("baseline-inventory.sh", [row["file"] for row in contract["contract"]["files"]])
         self.assertEqual(contract["contract"]["transfer_protocol"], 2)
 
     def test_contratto_digest_errato_rifiutato(self):

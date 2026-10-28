@@ -1524,7 +1524,7 @@ def recover_filesystem_release(*, operation_id, private_root, expected_private_r
             backup_tool.close_private_directories(private)
 
 
-def _load_verified_current_state(expected_state_sha256):
+def _load_verified_current_state(expected_state_sha256, *, inventory_reader=None):
     """Rilegge stato, journal e inventari con i descriptor privati e il lock CLI."""
     private = None
     lock_fd = None
@@ -1538,8 +1538,8 @@ def _load_verified_current_state(expected_state_sha256):
         if state["state_sha256"] != expected_state_sha256:
             raise PublisherError("current-release è cambiato dopo l'ispezione iniziale.")
         tool_commit = state["release"]["inventory_tool_commit"]
-        fresh = (baseline_tool.acquire_fresh_inventory(tool_commit),
-                 baseline_tool.acquire_fresh_inventory(tool_commit))
+        reader = inventory_reader or baseline_tool.acquire_fresh_inventory
+        fresh = (reader(tool_commit), reader(tool_commit))
         release_state_tool.validate_fresh_release_inventories(state, fresh)
         return state
     except (backup_tool.BackupError, baseline_tool.BaselineError,
@@ -1555,19 +1555,21 @@ def _load_verified_current_state(expected_state_sha256):
 
 
 def build_preflight(package_root, inventory_path, release_sha, *, provenance_path,
-                    archive_path, expected_run_id):
-    """Confronta candidato, commit server e live; non scrive alcun file."""
+                    archive_path, expected_run_id, toolchain_sha256=None):
+    """Confronta candidato e live con autorità esplicita; non scrive alcun file."""
+    if toolchain_sha256 is not None:
+        production_adapter.verify_private_toolchain(toolchain_sha256)
     records = verify_artifact(package_root, inventory_path, release_sha,
                               provenance_path=provenance_path, archive_path=archive_path,
                               expected_run_id=expected_run_id)
-    try:
-        authorized = production_adapter.verify_repository_sources(release_sha)
-        branch = production_adapter._git_output(["branch", "--show-current"]).decode("ascii").strip()
-    except (production_adapter.ProductionAdapterError, UnicodeError) as exc:
-        raise PublisherError(f"Repository IONOS non autorizzato: {exc}") from exc
-    if branch != "main" or authorized != release_sha:
-        raise PublisherError("Repository server non è main allo SHA esatto dell'artefatto.")
-    inspection = production_adapter.inspect_production_state(release_sha)
+    if toolchain_sha256 is None:
+        inspection = production_adapter.inspect_production_state(release_sha)
+        if production_adapter._git_output(["branch", "--show-current"]).decode("ascii").strip() != "main":
+            raise PublisherError("Il preflight legacy richiede il branch Git main.")
+        reader = None
+    else:
+        inspection = production_adapter.inspect_production_state(toolchain_sha256=toolchain_sha256)
+        reader = production_adapter.private_inventory_reader(toolchain_sha256)
     blockers = list(inspection["blockers"])
     live = {row["path"]: row for row in inspection.get("live_file_records", [])}
     reference = {row["path"]: row for row in inspection.get("current_reference_files", [])}
@@ -1585,7 +1587,7 @@ def build_preflight(package_root, inventory_path, release_sha, *, provenance_pat
     release_plan = None
     current = inspection.get("current_release")
     if current and current.get("state_sha256"):
-        current_state = _load_verified_current_state(current["state_sha256"])
+        current_state = _load_verified_current_state(current["state_sha256"], inventory_reader=reader)
         operation_id = "plan-" + uuid.uuid4().hex
         try:
             release_plan = make_release_state_plan(current_state, records, operation_id)
@@ -1598,6 +1600,8 @@ def build_preflight(package_root, inventory_path, release_sha, *, provenance_pat
     return {
         "status": "blocked" if blockers else "ready",
         "release_sha": release_sha,
+        "toolchain_sha256": inspection.get("toolchain_sha256"),
+        "publish_allowed": False,
         "artifact_files": len(records),
         "live_files": len(live),
         "changes": changes,
@@ -1745,7 +1749,9 @@ def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     status = commands.add_parser("status", help="ispezione read-only dello stato pubblico")
-    status.add_argument("--authorized-sha", required=True)
+    status_authority = status.add_mutually_exclusive_group(required=True)
+    status_authority.add_argument("--authorized-sha")
+    status_authority.add_argument("--toolchain-sha256")
     verify = commands.add_parser("verify-artifact", help="verifica offline package, archivio e provenance")
     verify.add_argument("--release-sha", required=True)
     verify.add_argument("--package", required=True)
@@ -1753,6 +1759,7 @@ def parser():
     verify.add_argument("--provenance", required=True)
     verify.add_argument("--archive", required=True)
     verify.add_argument("--run-id", required=True)
+    verify.add_argument("--toolchain-sha256", help="verifica anche gli strumenti privati con il digest CI approvato")
     create = commands.add_parser("create-provenance", help="crea provenance esclusiva per l'artefatto CI")
     create.add_argument("--release-sha", required=True)
     create.add_argument("--ref", required=True)
@@ -1768,6 +1775,7 @@ def parser():
         item.add_argument("--provenance", required=True)
         item.add_argument("--archive", required=True)
         item.add_argument("--run-id", required=True)
+        item.add_argument("--toolchain-sha256", help="autorità privata indipendente dal checkout Git")
     backup = commands.add_parser("backup", help="crea e verifica un backup fresco solo nell'area privata")
     backup.add_argument("--account-quota-free-bytes", type=int, required=True)
     backup.add_argument("--confirm", required=True,
@@ -1785,18 +1793,27 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         if args.command == "status":
-            result = production_adapter.inspect_production_state(args.authorized_sha)
+            result = production_adapter.inspect_production_state(
+                args.authorized_sha, toolchain_sha256=args.toolchain_sha256)
         elif args.command == "create-provenance":
             _require_ci_provenance_context(args)
             result = create_provenance(args.inventory, args.archive, args.output,
                                        args.release_sha, args.run_id, args.ref)
         elif args.command == "verify-artifact":
+            if (args.toolchain_sha256 is None
+                    and pathlib.Path(__file__).absolute().parent == production_adapter.PRIVATE_TOOLS_ROOT):
+                raise PublisherError("La verifica dalla toolchain privata richiede --toolchain-sha256 dal report CI approvato.")
+            if args.toolchain_sha256 is not None:
+                production_adapter.verify_private_toolchain(args.toolchain_sha256)
+                _require_private_staging_paths(args.package, args.inventory, args.provenance, args.archive)
             records = verify_artifact(args.package, args.inventory, args.release_sha,
                                       provenance_path=args.provenance, archive_path=args.archive,
                                       expected_run_id=args.run_id)
             result = {"status": "verified", "release_sha": args.release_sha,
                       "run_id": args.run_id, "files": len(records),
                       "provenance_is_signature": False}
+            if args.toolchain_sha256 is not None:
+                result["toolchain_sha256"] = args.toolchain_sha256
         elif args.command == "backup":
             expected = f"CREATE-BACKUP {production_adapter.BASELINE_SHA256}"
             if args.confirm != expected:
@@ -1809,7 +1826,7 @@ def main(argv=None):
             result = build_preflight(
                 args.package, args.inventory, args.release_sha,
                 provenance_path=args.provenance, archive_path=args.archive,
-                expected_run_id=args.run_id)
+                expected_run_id=args.run_id, toolchain_sha256=args.toolchain_sha256)
             if args.command == "publish":
                 blocked_operation("publish")
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))

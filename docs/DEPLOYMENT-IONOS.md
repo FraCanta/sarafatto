@@ -225,7 +225,7 @@ Queste fasi non abilitano deploy o rollback reali, non modificano i file applica
 
 ### Workflow manuale
 
-Il workflow esegue build e validazione anche su push a `main`. `run_remote_state_inspection` è facoltativo, disattivato per default e attivabile solo da `workflow_dispatch`; se abilitato esegue solo `production_adapter.py inspect` via SSH, con chiave e host verificato, e non scrive sul server. Richiede che il repository IONOS sia stato aggiornato manualmente allo SHA del dispatch; altrimenti il controllo fallisce. Non avvia bootstrap, backup, staging o operazioni pubbliche. La build dell'artefatto e il job `remote-dry-run` restano separati.
+Il workflow esegue build e validazione anche su push a `main`. `run_remote_state_inspection` è facoltativo, disattivato per default e attivabile solo da `workflow_dispatch`; se abilitato esegue solo `production_adapter.py inspect` dalla toolchain privata via SSH, con chiave e host verificato, e non scrive sul server. Il digest autorizzato degli strumenti arriva dal checkout CI del dispatch; il repository Git IONOS non viene consultato. Non avvia bootstrap, backup, staging o operazioni pubbliche. La build dell'artefatto e il job `remote-dry-run` restano separati.
 
 ### Runbook e classi di operazione
 
@@ -594,7 +594,9 @@ La compatibilità degli strumenti è verificata separatamente. Il comando `toolc
 calcola un contratto deterministico con versione del protocollo, entry Vite,
 perimetro gestito e SHA-256 dei sei moduli realmente importati: `artifact_transfer_tool.py`,
 `production_publisher.py`, `production_adapter.py`, `baseline_tool.py`, `backup_tool.py`
-e `release_state_tool.py`. Tutti devono essere file regolari nello stesso percorso
+e `release_state_tool.py`, più `baseline-inventory.sh` nel contratto schema 2.
+Lo script è incluso perché viene eseguito per acquisire gli inventari freschi.
+Tutti devono essere file regolari nello stesso percorso
 degli strumenti, senza symlink/hardlink. La CI calcola il digest sui propri file
 autorizzati e lo passa via SSH; il server deve riprodurlo prima di ogni operazione.
 Non è sufficiente che il server dichiari una versione compatibile. Un checkout a uno
@@ -603,7 +605,7 @@ si ferma prima della prenotazione. Non è richiesto un `git pull` applicativo.
 
 ### Prerequisito iniziale degli strumenti e controlli IONOS
 
-Il receiver protocollo 2 e i sei moduli devono essere installati una volta tramite
+Il receiver protocollo 2, i sei moduli e lo script inventario devono essere installati tramite
 un'operazione privata autorizzata in `/home/www/sarafatto-deploy/tools/scripts/deploy/`.
 La loro installazione o sostituzione non fa parte del job di trasferimento. È
 possibile aggiornare soltanto questi strumenti con copia autenticata e verificata,
@@ -636,6 +638,121 @@ quota sufficiente per archivio più estrazione e che il percorso sia esterno a
 `df` da solo non la dimostra. Per il trasferimento non servono scp, rsync o scritture
 pubbliche. Il requisito `/proc/<pid>/fdinfo` riguarda il prestito del lock nel
 publisher, non la ricezione privata che acquisisce autonomamente il lock.
+
+### Autorità privata per inspect, status e preflight (contratto schema 2)
+
+I tre riferimenti sono indipendenti: digest della toolchain autorizzata, SHA della
+release candidata e release pubblica attestata da baseline/current-release/journal.
+HEAD del repository IONOS non dimostra nessuno degli ultimi due. `inspect` e
+`status` privati richiedono `--toolchain-sha256`; `preflight` e `verify-artifact`
+accettano lo stesso argomento. Senza di esso i comandi legacy da repository
+mantengono i controlli Git, mentre la copia privata non può promuovere il vecchio
+checkout a propria autorità. L'offline `verify-artifact` della CI resta compatibile.
+
+Il digest atteso deve essere copiato dal report `TOOLCHAIN.json` del run GitHub
+approvato, insieme allo SHA del commit strumenti e all'identità del run. NON
+assegnarlo con `EXPECTED=$(python ... toolchain ...)` sul server: il digest
+calcolato dal target è un risultato da confrontare, non un'autorizzazione.
+L'autorizzazione esterna è il confine di fiducia, attraverso revisione GitHub e
+accesso SSH autenticato; non viene simulata una firma crittografica della provenance.
+Prima di invocare Python remoto, sia il job di staging sia quello di ispezione
+eseguono `sha256sum --strict -c -` su IONOS con un elenco di checksum prodotto
+dal checkout CI autorizzato. Questo controllo è esterno al processo Python da
+verificare: non usa hash attesi dichiarati dal server. Restano necessari un
+account SSH fidato e il divieto di modificare la toolchain durante i job; non
+si pretende di attestare un host o un account SSH compromesso.
+
+Il contratto ora comprende lo script inventario. Il precedente digest
+`f1f46a87b4b725a8c2e7ef51dcd6e5c5e6bd96925448638ad7926cf9a18a82d0`
+identifica i vecchi sei file e non deve essere riutilizzato per autorizzare questi
+strumenti aggiornati. Il workflow produce separatamente l'artifact
+`sarafatto-toolchain-<commit>` con sette file, `TOOLCHAIN.json`, `SHA256SUMS`, archivio e relativo
+checksum. Non lo installa e non modifica la toolchain server automaticamente.
+
+### Aggiornamento controllato dei soli strumenti privati
+
+Questa è una procedura manuale da autorizzare separatamente; non è eseguita dal
+workflow e non pubblica file WordPress. Non modificare baseline, current-release,
+backup applicativi o il checkout `/home/www/sarafatto-repo`.
+
+1. Dopo CI Ubuntu verde, scaricare da GitHub l'artifact strumenti del commit
+   revisionato. Conservare indipendentemente digest archivio e digest contratto
+   dal run approvato. Sospendere i job SSH/staging, attendere quelli già avviati
+   e accertare che non siano in corso operazioni CLI della toolchain.
+2. Creare una directory nuova `0700` sotto staging, per esempio
+   `/home/www/sarafatto-deploy/staging/toolchain-update-<commit>-<run>`.
+   Se esiste, fermarsi. Trasferire lì l'archivio con copia autenticata esclusiva,
+   senza sovrascrivere directory o file precedenti.
+3. Confrontare SHA-256 dell'archivio con il valore conservato da GitHub. Esaminare
+   `tar -tvzf`: devono esserci solo `TOOLCHAIN.json`, `SHA256SUMS`, `scripts/deploy/`, i sei
+   moduli Python e `baseline-inventory.sh`, senza link o percorsi esterni.
+   Estrarre solo in quella directory privata nuova, con `umask 077`. Dalla root
+   estratta eseguire `sha256sum --strict -c SHA256SUMS` prima di avviare Python.
+4. Verificare la copia candidata contro il digest ESTERNO approvato:
+
+   ```sh
+   python3 -B /home/www/sarafatto-deploy/staging/toolchain-update-<commit>-<run>/scripts/deploy/artifact_transfer_tool.py toolchain \
+     --expected-toolchain-sha256 '<nuovo digest contratto approvato su GitHub>'
+   ```
+
+5. Con tutti i job fermi, acquisire `site-operation.lock` esclusivo non bloccante
+   con `flock -n`. In una directory privata di storico NUOVA, riservata con
+   `mkdir` esclusivo, conservare l'intera directory strumenti precedente.
+   Sostituire soltanto `/home/www/sarafatto-deploy/tools/scripts/deploy/` con la
+   directory candidata completa. Non usare copie ricorsive sulla webroot,
+   cancellazioni o sovrascritture della copia storica. Il breve intervallo tra
+   spostamenti riguarda soltanto gli strumenti: WordPress non li include.
+6. Prima di riaprire i job, eseguire `toolchain --expected-toolchain-sha256` dalla
+   posizione definitiva, quindi `status` sotto riportato. Controllare owner,
+   directory private `0700`, file strumenti `0600` (o `0644` nella root privata
+   protetta, mai scrivibili da gruppo/altri) e lock `0600`.
+7. Se installazione o verifica fallisce, lasciare i job sospesi. Sotto lo stesso
+   lock conservare separatamente la copia non valida e rimettere la directory
+   strumenti storica completa, verificando il SUO digest precedente. Non
+   sovrascrivere una destinazione inattesa e non eseguire recovery del sito.
+
+Questo aggiornamento è necessario quando cambia la toolchain, non a ogni release
+applicativa. Il checkout Git IONOS può restare al commit `b2f4698...`.
+
+### Ripetizione dei controlli per l'artifact della run 40746174010
+
+Tutti i comandi seguenti sono **di sola lettura**. Inserire il NUOVO digest
+autorizzato da GitHub, non quello auto-calcolato sul server e non il precedente
+`f1f46a87...`. Non occorre ritrasferire l'artifact della run #51: archivio,
+inventario e provenance vengono riverificati direttamente senza riscrivere la
+prenotazione o il marker che conservano la provenienza della vecchia toolchain.
+
+```sh
+TOOLS=/home/www/sarafatto-deploy/tools/scripts/deploy
+EXPECTED_TOOLCHAIN_SHA256='<nuovo digest dal report CI approvato>'
+ARTIFACT=/home/www/sarafatto-deploy/staging/incoming/run-40746174010-042e1a5b183e
+
+python3 -B "$TOOLS/production_adapter.py" inspect \
+  --toolchain-sha256 "$EXPECTED_TOOLCHAIN_SHA256"
+python3 -B "$TOOLS/production_publisher.py" status \
+  --toolchain-sha256 "$EXPECTED_TOOLCHAIN_SHA256"
+
+python3 -B "$TOOLS/production_publisher.py" verify-artifact \
+  --toolchain-sha256 "$EXPECTED_TOOLCHAIN_SHA256" \
+  --release-sha 042e1a5b183e921cda5043432948bc0632609e27 --run-id 40746174010 \
+  --package "$ARTIFACT/package" --inventory "$ARTIFACT/inventory.tsv" \
+  --archive "$ARTIFACT/sarafatto-release.tar.gz" --provenance "$ARTIFACT/sarafatto-provenance.json"
+
+python3 -B "$TOOLS/production_publisher.py" preflight \
+  --toolchain-sha256 "$EXPECTED_TOOLCHAIN_SHA256" \
+  --release-sha 042e1a5b183e921cda5043432948bc0632609e27 --run-id 40746174010 \
+  --package "$ARTIFACT/package" --inventory "$ARTIFACT/inventory.tsv" \
+  --archive "$ARTIFACT/sarafatto-release.tar.gz" --provenance "$ARTIFACT/sarafatto-provenance.json"
+```
+
+`status` deve attestare i file pubblici contro lo stato corrente, senza confrontare
+la release candidata con HEAD del server. Errori di toolchain, baseline, journal,
+inventario o artifact restituiscono codice 2. Il preflight può ancora restituire
+codice 3 e `status: blocked` per approvazioni mancanti, rimozioni non autorizzate
+o writer pubblico disabilitato: non equivale a un fallimento del confronto Git,
+né autorizza una pubblicazione. Il vecchio `--authorized-sha` rimane disponibile
+soltanto per il percorso legacy, con errori distinti per accesso, HEAD differente,
+file assenti nel commit e contenuti del checkout modificati.
 
 ### Primo collaudo manuale su GitHub
 

@@ -6,6 +6,7 @@ le sole operazioni CLI disponibili leggono stato e inventario.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -26,6 +27,7 @@ except ImportError:  # Importabile per test statici Windows; runtime IONOS è PO
 PUBLIC_ROOT = pathlib.Path("/home/www/public/wp-content")
 PRIVATE_ROOT = pathlib.Path("/home/www/sarafatto-deploy")
 REPOSITORY_ROOT = pathlib.Path("/home/www/sarafatto-repo")
+PRIVATE_TOOLS_ROOT = PRIVATE_ROOT / "tools/scripts/deploy"
 BASELINE_SHA256 = "07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd"
 SOURCE_FILES = (
     "scripts/deploy/production_adapter.py",
@@ -123,7 +125,8 @@ def _open_checked_dir(path, *, mode=0o700):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     info = os.fstat(fd)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) != mode):
+            or (stat.S_IMODE(info.st_mode) != mode if mode is not None
+                else bool(stat.S_IMODE(info.st_mode) & 0o022))):
         os.close(fd)
         raise ProductionAdapterError(f"Proprietario o permessi inattesi: {path}.")
     return fd
@@ -138,9 +141,13 @@ def _git_output(arguments):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ProductionAdapterError("Verifica read-only del repository IONOS non riuscita.") from exc
+        raise ProductionAdapterError("Repository Git IONOS non accessibile o comando scaduto.") from exc
     if result.returncode != 0:
-        raise ProductionAdapterError("Repository IONOS non verificabile contro lo SHA autorizzato.")
+        if arguments and arguments[0] == "show":
+            raise ProductionAdapterError("Contenuto Git non leggibile nel commit autorizzato.")
+        if arguments and arguments[0] == "ls-tree":
+            raise ProductionAdapterError("Albero Git del commit autorizzato non accessibile.")
+        raise ProductionAdapterError("Repository Git IONOS o HEAD non accessibile.")
     return result.stdout
 
 
@@ -169,15 +176,86 @@ def _read_repo_file(relative):
 
 def verify_repository_sources(authorized_sha):
     authorized_sha = validate_authorized_sha(authorized_sha)
-    _require_fixed_directory(REPOSITORY_ROOT)
+    try:
+        _require_fixed_directory(REPOSITORY_ROOT)
+    except ProductionAdapterError as exc:
+        raise ProductionAdapterError("Repository Git IONOS assente, non accessibile o non sicuro.") from exc
     head = _git_output(["rev-parse", "--verify", "HEAD"]).decode("ascii", errors="strict").strip()
     if head != authorized_sha:
-        raise ProductionAdapterError("Repository IONOS non allineato allo SHA autorizzato; ispezione bloccata.")
+        raise ProductionAdapterError("HEAD Git diverso dallo SHA autorizzato; ispezione legacy bloccata.")
     for relative in SOURCE_FILES:
+        if not _git_output(["ls-tree", "--name-only", authorized_sha, "--", relative]).strip():
+            raise ProductionAdapterError(f"File assente nel commit autorizzato: {relative}.")
         committed = _git_output(["show", f"{authorized_sha}:{relative}"])
-        if _read_repo_file(relative) != committed:
-            raise ProductionAdapterError(f"File sorgente remoto modificato rispetto al commit autorizzato: {relative}.")
+        try:
+            working = _read_repo_file(relative)
+        except OSError as exc:
+            raise ProductionAdapterError(f"File del checkout assente o illeggibile: {relative}.") from exc
+        if working != committed:
+            raise ProductionAdapterError(f"Contenuto del checkout modificato rispetto al commit autorizzato: {relative}.")
     return authorized_sha
+
+
+def verify_private_toolchain(expected_sha256):
+    """Il digest atteso deve arrivare dal report CI approvato, mai da un auto-bootstrap."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise ProductionAdapterError("Verifica della toolchain privata richiede POSIX/O_NOFOLLOW.")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(expected_sha256 or "")):
+        raise ProductionAdapterError("Digest toolchain autorizzato esternamente mancante o non valido.")
+    _require_fixed_directory(PRIVATE_TOOLS_ROOT)
+    if pathlib.Path(__file__).absolute() != PRIVATE_TOOLS_ROOT / "production_adapter.py":
+        raise ProductionAdapterError("Adapter caricato fuori dalla toolchain privata autorizzata.")
+    # Import tardivo: il ricevitore importa a sua volta adapter e publisher.
+    import artifact_transfer_tool
+    try:
+        report = artifact_transfer_tool._validate_toolchain(expected_sha256)
+        for path in (PRIVATE_ROOT, PRIVATE_ROOT / "tools", PRIVATE_ROOT / "tools/scripts", PRIVATE_TOOLS_ROOT):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o022):
+                raise ProductionAdapterError("Directory degli strumenti con ownership o permessi inattesi.")
+            if path == PRIVATE_ROOT and stat.S_IMODE(info.st_mode) != 0o700:
+                raise ProductionAdapterError("La root privata deve conservare permessi 0700.")
+        for row in report["contract"]["files"]:
+            info = (PRIVATE_TOOLS_ROOT / row["file"]).lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o022):
+                raise ProductionAdapterError(f"File strumenti non sicuro: {row['file']}.")
+        return report
+    except (artifact_transfer_tool.TransferError, artifact_transfer_tool.production_publisher.PublisherError,
+            OSError, ValueError) as exc:
+        raise ProductionAdapterError(f"Toolchain privata non autorizzata: {exc}") from exc
+
+
+def private_inventory_reader(expected_sha256):
+    """Esegue solo lo script privato coperto dal digest indipendente della toolchain."""
+    def acquire(_inventory_commit):
+        report = verify_private_toolchain(expected_sha256)
+        expected = next(row["sha256"] for row in report["contract"]["files"]
+                        if row["file"] == "baseline-inventory.sh")
+        directory_fd = _open_checked_dir(PRIVATE_TOOLS_ROOT, mode=None)
+        try:
+            import artifact_transfer_tool
+            try:
+                payload = artifact_transfer_tool._read_at(directory_fd, "baseline-inventory.sh", 1024 * 1024)
+            except (artifact_transfer_tool.TransferError, OSError) as exc:
+                raise ProductionAdapterError("Script inventario privato non leggibile in sicurezza.") from exc
+        finally:
+            os.close(directory_fd)
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise ProductionAdapterError("Script inventario privato cambiato dopo la verifica della toolchain.")
+        try:
+            result = subprocess.run(["bash", "-s"], input=payload, check=False,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProductionAdapterError("Acquisizione privata dell'inventario non eseguibile.") from exc
+        if result.returncode != 0 or not result.stdout:
+            raise ProductionAdapterError("Inventario privato fallito o vuoto; stato pubblico non verificato.")
+        try:
+            return result.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProductionAdapterError("Inventario privato non UTF-8.") from exc
+    return acquire
 
 
 def _canonical_live_inventory(text):
@@ -212,11 +290,21 @@ def _read_current_state(state_fd, baseline_sha):
         raise ProductionAdapterError(f"current-release.json non valido: {exc}") from exc
 
 
-def inspect_production_state(authorized_sha):
+def inspect_production_state(authorized_sha=None, *, toolchain_sha256=None):
     """Verifica stato e contenuti live con lock condiviso; non modifica file."""
     if os.name != "posix" or fcntl is None or not hasattr(os, "O_NOFOLLOW"):
         raise ProductionAdapterError("L'ispezione IONOS richiede POSIX, flock e O_NOFOLLOW.")
-    authorized_sha = verify_repository_sources(authorized_sha)
+    if toolchain_sha256 is not None:
+        if authorized_sha is not None:
+            raise ProductionAdapterError("Specificare una sola autorità: toolchain privata oppure repository legacy.")
+        trust = verify_private_toolchain(toolchain_sha256)
+        acquire_inventory = private_inventory_reader(toolchain_sha256)
+    else:
+        if pathlib.Path(__file__).absolute().parent == PRIVATE_TOOLS_ROOT:
+            raise ProductionAdapterError("La toolchain privata richiede --toolchain-sha256 dal report CI approvato.")
+        authorized_sha = verify_repository_sources(authorized_sha)
+        trust = None
+        acquire_inventory = baseline_tool.acquire_fresh_inventory
     _require_fixed_directory(PUBLIC_ROOT)
     baseline_tool.validate_private_state(PRIVATE_ROOT, PRIVATE_ROOT)
     root_fd = _open_checked_dir(PRIVATE_ROOT)
@@ -258,8 +346,8 @@ def inspect_production_state(authorized_sha):
             state_inventory_digest = current_state["inventory_sha256"]
 
         try:
-            first = baseline_tool.acquire_fresh_inventory(inventory_commit)
-            second = baseline_tool.acquire_fresh_inventory(inventory_commit)
+            first = acquire_inventory(inventory_commit)
+            second = acquire_inventory(inventory_commit)
         except baseline_tool.BaselineError as exc:
             raise ProductionAdapterError(f"Doppio inventario pubblico fresco fallito: {exc}") from exc
         first_files, _, first_raw_digest, _ = _canonical_live_inventory(first)
@@ -292,6 +380,8 @@ def inspect_production_state(authorized_sha):
         return {
             "status": status,
             "authorized_repository_sha": authorized_sha,
+            "toolchain_sha256": None if trust is None else trust["toolchain_sha256"],
+            "trust_mode": "legacy-git" if trust is None else "externally-authorized-private-toolchain",
             "baseline_sha256": baseline_sha,
             "baseline_commit_sha": baseline_commit,
             "current_release": None if current_state is None else {
@@ -335,14 +425,16 @@ def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("inspect", help="ispezione read-only baseline, stato e filesystem")
-    inspect.add_argument("--authorized-sha", required=True)
+    authority = inspect.add_mutually_exclusive_group(required=True)
+    authority.add_argument("--authorized-sha", help="solo percorso legacy Git")
+    authority.add_argument("--toolchain-sha256", help="digest degli strumenti dal report CI approvato")
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        result = inspect_production_state(args.authorized_sha)
+        result = inspect_production_state(args.authorized_sha, toolchain_sha256=args.toolchain_sha256)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0 if result["status"] == "verified-current" else 3
     except (ProductionAdapterError, OSError, ValueError, UnicodeError,
