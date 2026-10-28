@@ -302,6 +302,84 @@ class BaselineToolTests(unittest.TestCase):
             self.initialize(candidate, approved_hash, provider=changing_provider, private_root=private_root)
         self.assertFalse((private_root / "state" / "baseline.json").exists())
 
+    @unittest.skipUnless(os.name == "posix" and fcntl is not None, "Verifica flock richiede Ubuntu/POSIX.")
+    def test_lock_prestato_verificato_senza_riacquisizione_o_rilascio(self):
+        private = self.make_private_root(self.root / "private-lock")
+        directory_fd = os.open(private / "locks", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        lock_fd = baseline_tool.acquire_baseline_lock(None, directory_fd)
+        duplicate_fd = os.dup(lock_fd)
+        try:
+            with mock.patch.object(baseline_tool.fcntl, "flock", side_effect=AssertionError("flock inatteso")):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+                baseline_tool.validate_baseline_lock(duplicate_fd, directory_fd)
+            self.assertEqual(os.fstat(lock_fd).st_ino, os.fstat(duplicate_fd).st_ino)
+            with self.assertRaisesRegex(baseline_tool.BaselineError, "già occupato"):
+                baseline_tool.acquire_baseline_lock(None, directory_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            with self.assertRaisesRegex(baseline_tool.BaselineError, "non detiene"):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+            # Una funzione autonoma può acquisirlo dopo il rilascio del proprietario.
+            standalone = baseline_tool.acquire_baseline_lock(None, directory_fd)
+            fcntl.flock(standalone, fcntl.LOCK_UN)
+            os.close(standalone)
+        finally:
+            os.close(duplicate_fd)
+            os.close(lock_fd)
+            os.close(directory_fd)
+
+    @unittest.skipUnless(os.name == "posix" and fcntl is not None, "Verifica flock richiede Ubuntu/POSIX.")
+    def test_lock_prestato_rifiuta_descriptor_estranei_condivisi_e_sostituzioni(self):
+        private = self.make_private_root(self.root / "private-invalid-lock")
+        directory_fd = os.open(private / "locks", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        lock_fd = baseline_tool.acquire_baseline_lock(None, directory_fd)
+        unrelated_fd = os.open("other.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                               dir_fd=directory_fd)
+        same_file_fd = os.open("site-operation.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            for descriptor in (None, False, -1, directory_fd, unrelated_fd, same_file_fd):
+                with self.subTest(descriptor=descriptor), self.assertRaises(baseline_tool.BaselineError):
+                    baseline_tool.validate_baseline_lock(descriptor, directory_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(baseline_tool.BaselineError, "non detiene"):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.link("site-operation.lock", "alias.lock", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            with self.assertRaises(baseline_tool.BaselineError):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+            os.unlink("alias.lock", dir_fd=directory_fd)
+            os.rename("site-operation.lock", "held.lock", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            replacement = os.open("site-operation.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                                  0o600, dir_fd=directory_fd)
+            os.close(replacement)
+            with self.assertRaises(baseline_tool.BaselineError):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+            os.unlink("site-operation.lock", dir_fd=directory_fd)
+            os.symlink("held.lock", "site-operation.lock", dir_fd=directory_fd)
+            with self.assertRaises(baseline_tool.BaselineError):
+                baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(same_file_fd)
+            os.close(unrelated_fd)
+            os.close(lock_fd)
+            os.close(directory_fd)
+
+    @unittest.skipUnless(os.name == "posix" and fcntl is not None, "Verifica flock richiede Ubuntu/POSIX.")
+    def test_lock_prestato_senza_prova_del_possesso_fallisce_chiuso(self):
+        private = self.make_private_root(self.root / "private-unverifiable-lock")
+        directory_fd = os.open(private / "locks", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        lock_fd = baseline_tool.acquire_baseline_lock(None, directory_fd)
+        try:
+            with mock.patch.object(baseline_tool.os, "open", side_effect=PermissionError("fdinfo negato")):
+                with self.assertRaisesRegex(baseline_tool.BaselineError, "non verificabile"):
+                    baseline_tool.validate_baseline_lock(lock_fd, directory_fd)
+            with self.assertRaisesRegex(baseline_tool.BaselineError, "già occupato"):
+                baseline_tool.acquire_baseline_lock(None, directory_fd)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            os.close(directory_fd)
+
     def test_atomic_writer_only_accepts_private_root_and_does_not_overwrite(self):
         candidate = self.compare([self.old_bundle, self.backup])["candidate"]
         private_root = self.make_private_root(self.root / "private")

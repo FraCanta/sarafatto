@@ -778,7 +778,7 @@ def persist_verified_application_release_state(candidate, expected_previous_stat
         raise ReleaseStateError("È promuovibile soltanto uno stato release applicativo schema 2.")
     root_path, locks_path = baseline.validate_private_state(private_root, expected_root)
     root_fd = os.open(private_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    state_fd = locks_fd = lock_fd = temp_fd = old_fd = None
+    state_fd = locks_fd = temp_fd = old_fd = None
     owned_lock = lock_fd is None
     temp_name = ".current-release.update." + os.urandom(12).hex()
     try:
@@ -789,6 +789,8 @@ def persist_verified_application_release_state(candidate, expected_previous_stat
         _assert_named(root_fd, "locks", locks_fd, "locks")
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(locks_path, locks_fd)
+        else:
+            baseline.validate_baseline_lock(lock_fd, locks_fd)
         current = load_current_state(state_fd, candidate["initial_baseline"]["sha256"])
         if current["state_sha256"] == candidate["state_sha256"]:
             events = read_journal_at(state_fd)
@@ -1081,6 +1083,8 @@ def append_operation_event(state_fd, locks_fd, operation_id, status, details, *,
     owned_lock = lock_fd is None
     if owned_lock:
         lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+    else:
+        baseline.validate_baseline_lock(lock_fd, locks_fd)
     try:
         events = read_journal_at(state_fd)
         active = {}
@@ -1327,13 +1331,15 @@ def append_verified_application_terminal(candidate, expected_parent_state_sha256
     entry = chain["entries"][-1]
     status = "release_committed" if entry["operation_kind"] == "publish" else "release_rolled_back"
     root_fd = os.open(private_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    state_fd = locks_fd = lock_fd = None
+    state_fd = locks_fd = None
     owned_lock = lock_fd is None
     try:
         state_fd = _open_dir(root_fd, "state")
         locks_fd = _open_dir(root_fd, "locks")
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+        else:
+            baseline.validate_baseline_lock(lock_fd, locks_fd)
         current = load_current_state(state_fd, candidate["initial_baseline"]["sha256"])
         if current["state_sha256"] != expected_parent_state_sha256:
             raise ReleaseStateError("current-release parent cambiato; terminale rifiutato.")
@@ -1433,6 +1439,8 @@ def append_verified_recovery_completion(operation_id, expected_parent_state_sha2
         locks_fd = _open_dir(root_fd, "locks")
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(None, locks_fd)
+        else:
+            baseline.validate_baseline_lock(lock_fd, locks_fd)
         parent = load_current_state(state_fd)
         if parent["state_sha256"] != expected_parent_state_sha256:
             raise ReleaseStateError("Current-release cambiato durante la recovery.")

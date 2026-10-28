@@ -216,7 +216,21 @@ class ProductionArtifactTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
 
-        published = self._publish_fixture_b(fixture)
+        checked_phases = set()
+
+        def assert_lock_held(event, _path=None, _count=None):
+            with self.assertRaisesRegex(publisher.baseline_tool.BaselineError, "già occupato"):
+                publisher.baseline_tool.acquire_baseline_lock(fixture.locks)
+            checked_phases.add(event)
+
+        def healthy_with_lock():
+            assert_lock_held("health")
+            return {"status": "healthy", "check": "fixture"}
+
+        published = self._publish_fixture_b(fixture, fault_hook=assert_lock_held,
+                                          health_check=healthy_with_lock)
+        self.assertTrue({"after-file", "after-health-verified", "after-terminal", "health"}
+                        .issubset(checked_phases))
         self.assertEqual(published["status"], "published")
         self.assertTrue(published["public_writes_performed"])
         state_b = publisher.release_state_tool.validate_state_document(
@@ -252,10 +266,11 @@ class ProductionArtifactTests(unittest.TestCase):
             quota_free_bytes=10**10, private_root=fixture.private,
             expected_private_root=fixture.private, public_root=fixture.public,
             expected_public_root=fixture.public,
-            health_check=lambda: {"status": "healthy", "check": "fixture-after-rollback"},
+            health_check=healthy_with_lock,
             rollback_health_check=lambda: {"status": "healthy", "check": "fixture-parent"},
             inventory_reader=self._inventory_reader(fixture.public),
-            approved_removals=removals, removal_approval=rollback_approval)
+            approved_removals=removals, removal_approval=rollback_approval,
+            fault_hook=assert_lock_held)
         self.assertEqual(rolled_back["status"], "rolled-back")
         state_after = publisher.release_state_tool.validate_state_document(
             json.loads((fixture.state / publisher.release_state_tool.STATE_NAME).read_text(encoding="utf-8")),
@@ -271,6 +286,32 @@ class ProductionArtifactTests(unittest.TestCase):
             self.assertEqual(fixture.public.joinpath(*path.split("/")).read_bytes(), payload)
         events = self._journal_events(fixture)
         self.assertEqual(events[-1]["status"], "release_rolled_back")
+        released_lock = publisher.baseline_tool.acquire_baseline_lock(fixture.locks)
+        import fcntl
+        fcntl.flock(released_lock, fcntl.LOCK_UN)
+        os.close(released_lock)
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Esclusione concorrente richiede flock POSIX.")
+    def test_orchestrazione_lock_occupato_non_scrive_file_stato_o_journal(self):
+        fixture = self._release_fixture()
+        before = publisher.inventory_target_tree(fixture.public)
+        state_path = fixture.state / publisher.release_state_tool.STATE_NAME
+        state_before = state_path.read_bytes()
+        journal_path = fixture.state / publisher.release_state_tool.JOURNAL_NAME
+        journal_before = journal_path.read_bytes() if journal_path.exists() else None
+        lock_fd = publisher.baseline_tool.acquire_baseline_lock(fixture.locks)
+        try:
+            with self.assertRaisesRegex(publisher.PublisherError, "Lock baseline già occupato"):
+                self._publish_fixture_b(fixture)
+            self.assertEqual(publisher.inventory_target_tree(fixture.public), before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertEqual(journal_path.read_bytes() if journal_path.exists() else None, journal_before)
+            self.assertEqual(list((fixture.private / "backups").iterdir()), [])
+        finally:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
                          "Rollback automatico end-to-end richiede filesystem POSIX.")

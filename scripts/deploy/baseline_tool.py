@@ -312,6 +312,46 @@ def acquire_baseline_lock(locks_dir, directory_fd=None):
     return lock_fd
 
 
+def validate_baseline_lock(lock_fd, directory_fd):
+    """Verifica un flock esclusivo già detenuto, senza acquisirlo o modificarlo.
+
+    Linux espone in fdinfo i flock della specifica open file description: un
+    altro descriptor dello stesso inode non costituisce prova del possesso.
+    Senza questa prova il prestito viene rifiutato, anche se il lock è libero.
+    Il chiamante conserva la responsabilità di rilascio e chiusura.
+    """
+    if (fcntl is None or os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or type(lock_fd) is not int or lock_fd < 0):
+        raise BaselineError("Descriptor del lock condiviso non valido.")
+    try:
+        opened = os.fstat(lock_fd)
+        named = os.stat("site-operation.lock", dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
+                or opened.st_nlink != 1 or named.st_nlink != 1
+                or opened.st_uid != os.getuid() or named.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600 or stat.S_IMODE(named.st_mode) != 0o600
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                or (fcntl.fcntl(lock_fd, fcntl.F_GETFL) & os.O_ACCMODE) != os.O_RDWR):
+            raise BaselineError("Descriptor diverso dal file site-operation.lock autorizzato.")
+        info_fd = os.open(f"/proc/{os.getpid()}/fdinfo/{lock_fd}", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(info_fd, "rb") as stream:
+            info = stream.read(65537)
+        if len(info) > 65536:
+            raise BaselineError("Informazioni del lock condiviso oltre limite.")
+        locks = [line.split() for line in info.decode("ascii").splitlines()
+                 if line.startswith("lock:")]
+        if not any(len(fields) == 9 and fields[2:5] == ["FLOCK", "ADVISORY", "WRITE"]
+                   and fields[7:] == ["0", "EOF"] for fields in locks):
+            raise BaselineError("Il descriptor non detiene il flock esclusivo richiesto.")
+        latest = os.stat("site-operation.lock", dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(latest.st_mode) or latest.st_nlink != 1
+                or latest.st_uid != os.getuid() or stat.S_IMODE(latest.st_mode) != 0o600
+                or (latest.st_dev, latest.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise BaselineError("File del lock sostituito durante la verifica.")
+    except (OSError, UnicodeError) as exc:
+        raise BaselineError("Possesso del lock condiviso non verificabile; operazione bloccata.") from exc
+
+
 def install_without_overwrite(temporary, target):
     """Rename atomico senza sostituire un target creato concorrente."""
     if os.name == "nt":

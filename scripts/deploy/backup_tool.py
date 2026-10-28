@@ -702,6 +702,8 @@ def create_backup(backup_id, baseline_sha256, quota_free_bytes, *,
         owned_lock = lock_fd is None
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        else:
+            baseline.validate_baseline_lock(lock_fd, private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
@@ -950,6 +952,8 @@ def verify_backup(backup_id, baseline_sha256, manifest_sha256, *, private_root=P
         owned_lock = lock_fd is None
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        else:
+            baseline.validate_baseline_lock(lock_fd, private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
@@ -1203,6 +1207,8 @@ def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, 
         owned_lock = lock_fd is None
         if owned_lock:
             lock_fd = baseline.acquire_baseline_lock(paths["locks"], private["locks_fd"])
+        else:
+            baseline.validate_baseline_lock(lock_fd, private["locks_fd"])
     except Exception:
         close_private_directories(private)
         raise
