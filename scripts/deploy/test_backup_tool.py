@@ -516,18 +516,25 @@ class BackupToolTests(unittest.TestCase):
                 changed = True
             return result
 
-        with mock.patch.object(backup_tool, "verify_manifest_matches_baseline", side_effect=swap_after_private_descriptors_open):
-            with self.assertRaises(backup_tool.BackupError):
+        with mock.patch.object(backup_tool, "verify_manifest_matches_baseline", side_effect=swap_after_private_descriptors_open), \
+                mock.patch.object(backup_tool, "extract_verified_archive") as extract:
+            with self.assertRaisesRegex(backup_tool.BackupError, "Directory privata sostituita.*staging"):
                 backup_tool.restore_test(self.backup_id, self.baseline_sha, created["manifest_sha256"], 10**9,
                                          private_root=self.private, expected_private_root=self.private,
                                          disk_free_bytes=10**9)
+            extract.assert_not_called()
         self.assertTrue(changed)
+        self.assertTrue(self.staging.is_symlink())
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(list((self.private / "staging-held").iterdir()), [])
 
     @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
     def test_15_restore_test_riuscito_solo_in_staging(self):
         created = self.create()
+        current_path = self.state / backup_tool.release_state.STATE_NAME
+        self.assertFalse(current_path.exists())
+        manifest = json.loads((self.backups / self.backup_id / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("reference_state", manifest)
         before = {p: hash_bytes((self.public / p).read_bytes()) for p in self.files}
         report = backup_tool.restore_test(self.backup_id, self.baseline_sha, created["manifest_sha256"], 10**9,
                                           private_root=self.private, expected_private_root=self.private,
@@ -541,6 +548,46 @@ class BackupToolTests(unittest.TestCase):
                          set(self.files))
         for relative, (content, _) in self.files.items():
             self.assertEqual((restored / relative).read_bytes(), content.encode())
+        self.assertFalse(current_path.exists())
+
+    @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
+    def test_15a_restore_senza_current_release_blocca_journal_incompleto(self):
+        created = self.create()
+        state_fd = os.open(self.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        locks_fd = os.open(self.locks, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            backup_tool.release_state.append_operation_event(
+                state_fd, locks_fd, "restore-pending-fixture", "prepared", {"fixture": True})
+        finally:
+            os.close(locks_fd)
+            os.close(state_fd)
+        self.assertFalse((self.state / backup_tool.release_state.STATE_NAME).exists())
+        with self.assertRaisesRegex(backup_tool.BackupError, "(?i)operazione incompleta"):
+            backup_tool.restore_test(self.backup_id, self.baseline_sha, created["manifest_sha256"], 10**9,
+                                     private_root=self.private, expected_private_root=self.private,
+                                     disk_free_bytes=10**9)
+        self.assertEqual(list(self.staging.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "posix" and fcntl is not None, "openat/dir_fd disponibile sul runner Ubuntu")
+    def test_15b_restore_rifiuta_current_release_malformato_o_symlink(self):
+        created = self.create()
+        current_path = self.state / backup_tool.release_state.STATE_NAME
+        for scenario in ("malformed", "dangling-symlink"):
+            with self.subTest(scenario=scenario):
+                if scenario == "malformed":
+                    current_path.write_bytes(b"{}")
+                    current_path.chmod(0o600)
+                else:
+                    os.symlink(self.root / "missing-state.json", current_path)
+                try:
+                    with self.assertRaisesRegex(backup_tool.BackupError, "stato/journal non verificabile"):
+                        backup_tool.restore_test(self.backup_id, self.baseline_sha, created["manifest_sha256"], 10**9,
+                                                 private_root=self.private, expected_private_root=self.private,
+                                                 disk_free_bytes=10**9)
+                    self.assertEqual(list(self.staging.iterdir()), [])
+                    self.assertFalse((self.root / "missing-state.json").exists())
+                finally:
+                    current_path.unlink()
 
     @unittest.skipUnless(fcntl is not None, "fixture di lock eseguita su runner POSIX GitHub")
     def test_16_restore_test_integrity_error_blocca(self):

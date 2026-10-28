@@ -1215,10 +1215,21 @@ def restore_test(backup_id, baseline_sha256, manifest_sha256, quota_free_bytes, 
         baseline_document, digest, commit_sha, baseline_expected = validate_backup_baseline(
             None, baseline_sha256, state_fd=private["state_fd"])
         try:
-            current = release_state.load_current_state(private["state_fd"], digest)
+            # I backup storici precedono il bootstrap del registro corrente.
+            # Solo l'assenza effettiva è ammessa: un entry presente, anche un
+            # symlink pendente, deve passare la lettura e la validazione sicure.
+            try:
+                os.stat(release_state.STATE_NAME, dir_fd=private["state_fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            else:
+                current = release_state.load_current_state(private["state_fd"], digest)
             events = release_state.read_journal_at(private["state_fd"])
-            release_state.validate_current_state_journal(current, events)
-        except release_state.ReleaseStateError as exc:
+            if current is None:
+                release_state.unresolved_operation(events)
+            else:
+                release_state.validate_current_state_journal(current, events)
+        except (release_state.ReleaseStateError, OSError) as exc:
             raise BackupError(f"Restore-test bloccato da stato/journal non verificabile: {exc}") from exc
         backup_fd = open_directory_at(private["backups_fd"], backup_id, "backup")
         verification = verify_backup_directory(None, backup_id, baseline_sha256, manifest_sha256,
