@@ -24,6 +24,10 @@ MAX_ARCHIVE = 2 * 1024 * 1024 * 1024
 RESERVATION = "TRANSFER.json"
 COMPLETE = "TRANSFER_COMPLETE"
 TRANSFER_ID_RE = re.compile(r"^run-[0-9]+-[a-f0-9]{12}$")
+TRANSFER_PROTOCOL = 2
+PAYLOAD_FILES = {"sarafatto-release.tar.gz": ("archive_sha256", MAX_ARCHIVE),
+                 "sarafatto-inventory.tsv": ("inventory_sha256", MAX_INVENTORY),
+                 "sarafatto-provenance.json": ("provenance_sha256", 65536)}
 
 
 class TransferError(Exception):
@@ -149,40 +153,62 @@ def _transfer_name(transfer_id):
     return transfer_id
 
 
-def _read_reservation(transfer_fd, transfer_id, release_sha, run_id):
+def _read_reservation(transfer_fd, transfer_id, release_sha, run_id, toolchain_sha256):
     try:
         document = json.loads(_read_at(transfer_fd, RESERVATION, 16384).decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise TransferError("Prenotazione trasferimento malformata.") from exc
     fields = {"schema_version", "repository", "release_sha", "run_id", "ref", "transfer_id",
-              "archive_sha256", "inventory_sha256", "reserved_at_utc"}
+              "archive_sha256", "inventory_sha256", "provenance_sha256", "toolchain_sha256", "reserved_at_utc"}
     if (not isinstance(document, dict) or set(document) != fields
-            or document.get("schema_version") != 1
+            or document.get("schema_version") != TRANSFER_PROTOCOL
             or document.get("repository") != production_publisher.GITHUB_REPOSITORY
             or document.get("release_sha") != release_sha or document.get("run_id") != run_id
             or document.get("ref") != "refs/heads/main" or document.get("transfer_id") != transfer_id
+            or document.get("toolchain_sha256") != toolchain_sha256
+            or not re.fullmatch(r"[a-f0-9]{64}", str(document.get("provenance_sha256", "")))
             or not re.fullmatch(r"[a-f0-9]{64}", str(document.get("archive_sha256", "")))
             or not re.fullmatch(r"[a-f0-9]{64}", str(document.get("inventory_sha256", "")))):
         raise TransferError("Prenotazione non corrispondente al run autorizzato.")
     return document
 
 
-def reservation_digest(transfer_fd, key):
-    try:
-        record = json.loads(_read_at(transfer_fd, RESERVATION, 16384).decode("utf-8"))
-        return record[key]
-    except (UnicodeError, json.JSONDecodeError, KeyError) as exc:
-        raise TransferError("Prenotazione trasferimento non verificabile.") from exc
+def toolchain_contract():
+    """Identifica i moduli caricati senza consultare HEAD, branch o working tree Git."""
+    directory = pathlib.Path(__file__).absolute().parent
+    modules = {"artifact_transfer_tool.py": pathlib.Path(__file__).absolute(),
+               "baseline_tool.py": pathlib.Path(baseline_tool.__file__).absolute(),
+               "production_adapter.py": pathlib.Path(production_adapter.__file__).absolute(),
+               "production_publisher.py": pathlib.Path(production_publisher.__file__).absolute(),
+               "backup_tool.py": pathlib.Path(production_publisher.backup_tool.__file__).absolute(),
+               "release_state_tool.py": pathlib.Path(production_publisher.release_state_tool.__file__).absolute()}
+    files = []
+    for name, path in sorted(modules.items()):
+        if path != directory / name or path.resolve(strict=True) != path:
+            raise TransferError(f"Modulo strumenti caricato da un percorso inatteso: {name}.")
+        files.append({"file": name, "sha256": production_publisher._artifact_file_digest(path, 10 * 1024 * 1024)})
+    contract = {"schema_version": 1, "transfer_protocol": TRANSFER_PROTOCOL,
+                "provenance_schema": 1, "required_entries": list(production_publisher.REQUIRED_ENTRIES),
+                "components": list(production_publisher.ALLOWED_COMPONENTS), "files": files}
+    raw = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    return {"status": "compatible-toolchain", "toolchain_sha256": hashlib.sha256(raw).hexdigest(),
+            "contract": contract}
 
 
-def _validate_authorized_repository(release_sha):
-    try:
-        verified = production_adapter.verify_repository_sources(release_sha)
-        branch = production_adapter._git_output(["branch", "--show-current"]).decode("ascii").strip()
-    except (production_adapter.ProductionAdapterError, UnicodeError) as exc:
-        raise TransferError(f"Commit del repository IONOS non verificato: {exc}") from exc
-    if branch != "main" or verified != release_sha:
-        raise TransferError("Il repository IONOS non è su main allo SHA autorizzato.")
+def _validate_toolchain(expected):
+    if not re.fullmatch(r"[a-f0-9]{64}", str(expected or "")):
+        raise TransferError("Digest indipendente degli strumenti richiesto.")
+    report = toolchain_contract()
+    if report["toolchain_sha256"] != expected:
+        raise TransferError("Strumenti server incompatibili con quelli autorizzati dalla CI.")
+    return report
+
+
+def _validate_identity(transfer_id, release_sha, run_id):
+    if (not re.fullmatch(r"[a-f0-9]{40}", str(release_sha or ""))
+            or not re.fullmatch(r"[0-9]+", str(run_id or ""))
+            or _transfer_name(transfer_id) != f"run-{run_id}-{release_sha[:12]}"):
+        raise TransferError("Commit, run ID o trasferimento non concordanti.")
 
 
 def _lock_site_operation(locks_fd):
@@ -214,17 +240,20 @@ def _open_state_and_locks(root_fd):
         raise
 
 
-def reserve(transfer_id, release_sha, run_id, archive_sha256, inventory_sha256):
+def reserve(transfer_id, release_sha, run_id, archive_sha256, inventory_sha256, *,
+            provenance_sha256, toolchain_sha256):
     """Riserva una directory nuova; retry/replay dello stesso run non sovrascrive."""
     _require_posix()
     transfer_id = _transfer_name(transfer_id)
+    _validate_identity(transfer_id, release_sha, run_id)
     if (not re.fullmatch(r"[a-f0-9]{40}", str(release_sha or ""))
             or not re.fullmatch(r"[0-9]+", str(run_id or ""))
             or not re.fullmatch(r"[a-f0-9]{64}", str(archive_sha256 or ""))
             or not re.fullmatch(r"[a-f0-9]{64}", str(inventory_sha256 or ""))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(provenance_sha256 or ""))
             or transfer_id != f"run-{run_id}-{release_sha[:12]}"):
         raise TransferError("SHA, run ID, digest o identificativo trasferimento non concordanti.")
-    _validate_authorized_repository(release_sha)
+    _validate_toolchain(toolchain_sha256)
     root_fd, staging_fd, incoming_fd = _open_incoming()
     state_fd = locks_fd = lock_fd = transfer_fd = None
     try:
@@ -237,10 +266,11 @@ def reserve(transfer_id, release_sha, run_id, archive_sha256, inventory_sha256):
         os.fsync(incoming_fd)
         transfer_fd = _open_child_dir(incoming_fd, transfer_id)
         record = {
-            "schema_version": 1, "repository": production_publisher.GITHUB_REPOSITORY,
+            "schema_version": TRANSFER_PROTOCOL, "repository": production_publisher.GITHUB_REPOSITORY,
             "release_sha": release_sha, "run_id": str(run_id), "ref": "refs/heads/main",
             "transfer_id": transfer_id, "archive_sha256": archive_sha256,
             "inventory_sha256": inventory_sha256,
+            "provenance_sha256": provenance_sha256, "toolchain_sha256": toolchain_sha256,
             "reserved_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         }
         _write_new_at(transfer_fd, RESERVATION,
@@ -260,6 +290,62 @@ def reserve(transfer_id, release_sha, run_id, archive_sha256, inventory_sha256):
         os.close(incoming_fd)
         os.close(staging_fd)
         os.close(root_fd)
+
+
+def receive(transfer_id, release_sha, run_id, name, *, toolchain_sha256, stream):
+    """Riceve stdin SSH solo in un nome fisso prenotato, senza sovrascritture."""
+    _require_posix()
+    _validate_identity(transfer_id, release_sha, run_id)
+    _validate_toolchain(toolchain_sha256)
+    if name not in PAYLOAD_FILES:
+        raise TransferError("Nome payload fuori allowlist.")
+    root_fd, staging_fd, incoming_fd = _open_incoming()
+    state_fd = locks_fd = lock_fd = transfer_fd = payload_fd = None
+    try:
+        state_fd, locks_fd = _open_state_and_locks(root_fd)
+        lock_fd, fcntl = _lock_site_operation(locks_fd)
+        transfer_fd = _open_child_dir(incoming_fd, transfer_id)
+        reservation = _read_reservation(transfer_fd, transfer_id, release_sha, run_id, toolchain_sha256)
+        if COMPLETE in os.listdir(transfer_fd):
+            raise TransferError("Trasferimento già completo: ricezione rifiutata.")
+        try:
+            payload_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=transfer_fd)
+        except FileExistsError as exc:
+            raise TransferError("Payload già presente: nessuna sovrascrittura consentita.") from exc
+        digest, size = hashlib.sha256(), 0
+        key, limit = PAYLOAD_FILES[name]
+        while True:
+            block = stream.read(min(1024 * 1024, limit + 1 - size))
+            if not block:
+                break
+            size += len(block)
+            if size > limit:
+                raise TransferError("Payload ricevuto oltre limite.")
+            digest.update(block)
+            view = memoryview(block)
+            while view:
+                count = os.write(payload_fd, view)
+                if count <= 0:
+                    raise TransferError("Scrittura payload incompleta.")
+                view = view[count:]
+        os.fsync(payload_fd)
+        os.fsync(transfer_fd)
+        if digest.hexdigest() != reservation[key]:
+            raise TransferError("Digest payload ricevuto diverso dalla prenotazione; parziale conservato.")
+        return {"status": "received-private-only", "file": name, "sha256": digest.hexdigest(),
+                "bytes": size, "transfer_id": transfer_id, "public_writes_performed": False}
+    finally:
+        if payload_fd is not None:
+            os.close(payload_fd)
+        if transfer_fd is not None:
+            os.close(transfer_fd)
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        for descriptor in (locks_fd, state_fd, incoming_fd, staging_fd, root_fd):
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _parse_inventory(raw):
@@ -403,15 +489,12 @@ def _extract_archive(transfer_fd, archive_fd, inventory_bytes, records):
         raise
 
 
-def verify(transfer_id, release_sha, run_id):
+def verify(transfer_id, release_sha, run_id, *, toolchain_sha256):
     """Verifica trasferimento, estrae in privato e pubblica marker COMPLETE per ultimo."""
     _require_posix()
     transfer_id = _transfer_name(transfer_id)
-    if (not re.fullmatch(r"[a-f0-9]{40}", str(release_sha or ""))
-            or not re.fullmatch(r"[0-9]+", str(run_id or ""))
-            or transfer_id != f"run-{run_id}-{release_sha[:12]}"):
-        raise TransferError("Commit, run ID o trasferimento non concordanti.")
-    _validate_authorized_repository(release_sha)
+    _validate_identity(transfer_id, release_sha, run_id)
+    _validate_toolchain(toolchain_sha256)
     root_fd, staging_fd, incoming_fd = _open_incoming()
     state_fd = locks_fd = lock_fd = transfer_fd = package_fd = None
     try:
@@ -419,10 +502,18 @@ def verify(transfer_id, release_sha, run_id):
         lock_fd, fcntl = _lock_site_operation(locks_fd)
         transfer_fd = _open_child_dir(incoming_fd, transfer_id)
         names = set(os.listdir(transfer_fd))
-        reservation = _read_reservation(transfer_fd, transfer_id, release_sha, run_id)
+        reservation = _read_reservation(transfer_fd, transfer_id, release_sha, run_id, toolchain_sha256)
         allowed = {RESERVATION, "sarafatto-release.tar.gz", "sarafatto-inventory.tsv",
                    "sarafatto-provenance.json"}
         completed_names = allowed | {COMPLETE, "package", "inventory.tsv"}
+        if names not in (allowed, completed_names):
+            raise TransferError("Trasferimento incompleto o con file inattesi; nessun recupero automatico.")
+        # Anche le verifiche ripetute ricalcolano tutti i digest originariamente
+        # ricevuti; il solo marker COMPLETE non costituisce una prova.
+        for name, (key, limit) in PAYLOAD_FILES.items():
+            actual_digest, _ = _hash_at(transfer_fd, name, limit)
+            if actual_digest != reservation[key]:
+                raise TransferError("Digest ricevuti diversi da quelli prenotati nel run GitHub.")
         if names == completed_names:
             try:
                 marker = json.loads(_read_at(transfer_fd, COMPLETE, 4096).decode("utf-8"))
@@ -436,21 +527,21 @@ def verify(transfer_id, release_sha, run_id):
                 package_path, inventory_path, release_sha, provenance_path=provenance_path,
                 archive_path=archive_path, expected_run_id=run_id)
             marker_fields = {"schema_version", "transfer_id", "release_sha", "run_id",
-                             "archive_sha256", "inventory_sha256", "verified_files", "verified_at_utc"}
+                             "archive_sha256", "inventory_sha256", "provenance_sha256", "toolchain_sha256",
+                             "verified_files", "verified_at_utc"}
             if (not isinstance(marker, dict) or set(marker) != marker_fields
-                    or marker.get("schema_version") != 1 or marker.get("release_sha") != release_sha
+                    or marker.get("schema_version") != TRANSFER_PROTOCOL or marker.get("release_sha") != release_sha
                     or marker.get("run_id") != run_id
                     or marker.get("transfer_id") != transfer_id
-                    or marker.get("archive_sha256") != reservation_digest(transfer_fd, "archive_sha256")
-                    or marker.get("inventory_sha256") != reservation_digest(transfer_fd, "inventory_sha256")
+                    or any(marker.get(key) != reservation[key] for key in
+                           ("archive_sha256", "inventory_sha256", "provenance_sha256", "toolchain_sha256"))
                     or marker.get("verified_files") != len(records)
                     or not isinstance(marker.get("verified_at_utc"), str)):
                 raise TransferError("Marker COMPLETE non concorda con artifact verificato.")
             return {"status": "verified-private-artifact", "transfer_id": transfer_id,
                     "release_sha": release_sha, "archive_sha256": marker["archive_sha256"],
+                    "toolchain_sha256": toolchain_sha256,
                     "public_writes_performed": False}
-        if names != allowed:
-            raise TransferError("Trasferimento incompleto o con file inattesi; nessun recupero automatico.")
         inventory_bytes = _read_at(transfer_fd, "sarafatto-inventory.tsv", MAX_INVENTORY)
         provenance_raw = _read_at(transfer_fd, "sarafatto-provenance.json", 65536)
         archive_digest, _ = _hash_at(transfer_fd, "sarafatto-release.tar.gz", MAX_ARCHIVE)
@@ -484,9 +575,10 @@ def verify(transfer_id, release_sha, run_id):
             provenance_path=INCOMING_ROOT / transfer_id / "sarafatto-provenance.json",
             archive_path=INCOMING_ROOT / transfer_id / "sarafatto-release.tar.gz",
             expected_run_id=run_id)
-        marker = {"schema_version": 1, "transfer_id": transfer_id, "release_sha": release_sha,
+        marker = {"schema_version": TRANSFER_PROTOCOL, "transfer_id": transfer_id, "release_sha": release_sha,
                   "run_id": run_id, "archive_sha256": reservation["archive_sha256"],
                   "inventory_sha256": reservation["inventory_sha256"],
+                  "provenance_sha256": reservation["provenance_sha256"], "toolchain_sha256": toolchain_sha256,
                   "verified_files": len(publisher_records),
                   "verified_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")}
         _write_new_at(transfer_fd, COMPLETE,
@@ -509,28 +601,54 @@ def verify(transfer_id, release_sha, run_id):
         os.close(root_fd)
 
 
+def publisher_inputs(transfer_id, release_sha, run_id, *, toolchain_sha256):
+    """Espone i percorsi solo dopo riverifica completa; non invoca il publisher."""
+    result = verify(transfer_id, release_sha, run_id, toolchain_sha256=toolchain_sha256)
+    directory = INCOMING_ROOT / transfer_id
+    return {**result, "run_id": run_id, "publisher_inputs": {
+        "package": str(directory / "package"), "inventory": str(directory / "inventory.tsv"),
+        "archive": str(directory / "sarafatto-release.tar.gz"),
+        "provenance": str(directory / "sarafatto-provenance.json")}}
+
+
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     reserve_parser = commands.add_parser("reserve", help="prenota directory privata non riutilizzabile")
     verify_parser = commands.add_parser("verify", help="verifica artifact ricevuto e lo estrae in privato")
-    for command in (reserve_parser, verify_parser):
+    receive_parser = commands.add_parser("receive", help="riceve un file su stdin senza sovrascriverlo")
+    inputs_parser = commands.add_parser("publisher-inputs", help="riverifica e restituisce input privati verificati")
+    tools_parser = commands.add_parser("toolchain", help="contratto read-only degli strumenti caricati")
+    tools_parser.add_argument("--expected-toolchain-sha256")
+    for command in (reserve_parser, verify_parser, receive_parser, inputs_parser):
         command.add_argument("--transfer-id", required=True)
         command.add_argument("--release-sha", required=True)
         command.add_argument("--run-id", required=True)
+        command.add_argument("--toolchain-sha256", required=True)
     reserve_parser.add_argument("--archive-sha256", required=True)
     reserve_parser.add_argument("--inventory-sha256", required=True)
+    reserve_parser.add_argument("--provenance-sha256", required=True)
+    receive_parser.add_argument("--name", required=True, choices=sorted(PAYLOAD_FILES))
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        if args.command == "reserve":
+        if args.command == "toolchain":
+            result = (_validate_toolchain(args.expected_toolchain_sha256)
+                      if args.expected_toolchain_sha256 else toolchain_contract())
+        elif args.command == "reserve":
             result = reserve(args.transfer_id, args.release_sha, args.run_id,
-                             args.archive_sha256, args.inventory_sha256)
+                             args.archive_sha256, args.inventory_sha256,
+                             provenance_sha256=args.provenance_sha256, toolchain_sha256=args.toolchain_sha256)
+        elif args.command == "receive":
+            result = receive(args.transfer_id, args.release_sha, args.run_id, args.name,
+                             toolchain_sha256=args.toolchain_sha256, stream=sys.stdin.buffer)
         else:
-            result = verify(args.transfer_id, args.release_sha, args.run_id)
+            operation = verify if args.command == "verify" else publisher_inputs
+            result = operation(args.transfer_id, args.release_sha, args.run_id,
+                               toolchain_sha256=args.toolchain_sha256)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
     except (TransferError, production_publisher.PublisherError, production_adapter.ProductionAdapterError,

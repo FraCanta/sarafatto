@@ -487,12 +487,15 @@ package, senza estrarre file. La provenance documenta il run e i digest, ma non
 è una firma crittografica autonoma. Il comando `verify-artifact` esegue lo stesso
 controllo offline. `preflight` confronta release, repository IONOS, stato
 corrente e inventario live; accetta input soltanto sotto l'area privata
-`/home/www/sarafatto-deploy/staging`. Il comando `backup` può creare un backup
-fresco esclusivamente nell'area privata, con conferma esplicita e verifica
-della quota. `publish`, `rollback` e `recover` sono ancora bloccati: current-release
-e journal accettano al momento soltanto bootstrap iniziale e delta MU-plugin, e
-gli strumenti backup rifiutano una release applicativa successiva. Non esiste
-ancora un writer transazionale di produzione collaudato.
+`/home/www/sarafatto-deploy/staging`. Il preflight rilegge anche current-release
+e journal sotto lock privato e produce un piano schema 2 che conserva gli extra
+registrati e rifiuta rimozioni non approvate. Il comando `backup` può creare un
+backup fresco della release attiva esclusivamente nell'area privata, con
+conferma esplicita e verifica della quota. Le API di stato e backup supportano
+release applicative successive; `publish`, `rollback` e `recover` restano
+intenzionalmente bloccati: non è dimostrata su IONOS l'adozione uniforme della
+barriera PHP/OPcache e il drain dei worker durante la finestra di scrittura. Non
+è attivo alcun writer di file pubblici.
 
 Comandi di sola lettura, da eseguire sul server solo durante il collaudo
 autorizzato:
@@ -516,8 +519,9 @@ solo con l'input `stage_private_artifact=true`, la variabile repository
 `IONOS_PRIVATE_STAGING_ENABLED=true`, i Secrets SSH e l'Environment GitHub
 `ionos-private-staging`. Configurare l'Environment con revisori obbligatori prima
 di valorizzare la variabile. Il job verifica la host key, prenota una directory
-non riutilizzabile, trasferisce archivio/inventario/provenance via `scp` e lancia
-`artifact_transfer_tool.py verify`. Il server verifica commit, run ID, digest,
+non riutilizzabile, trasferisce archivio/inventario/provenance su stdin SSH con
+`artifact_transfer_tool.py receive` (creazione esclusiva) e lancia
+`artifact_transfer_tool.py publisher-inputs`. Il server verifica commit, run ID, digest,
 contenuto e manifest, poi crea `TRANSFER_COMPLETE` per ultimo. Replay, file extra
 e trasferimenti parziali bloccano la verifica; non avviene cleanup automatico.
 La provenance non è una firma. Il job non esegue preflight, publish, rollback o
@@ -578,3 +582,89 @@ privata dedicata. Prima dell'implementazione delle transazioni pubbliche servono
 Fino ad allora i push su `main` eseguono CI e build dell'artefatto. Il trasferimento
 privato è manuale e richiede l'Environment protetto; non è configurato deploy
 automatico e nessun job modifica WordPress pubblico.
+
+## Trasferimento privato protocollo 2, indipendente dal checkout applicativo
+
+`reserve`, `receive`, `verify` e `publisher-inputs` non invocano Git e non confrontano
+HEAD/branch del server con lo SHA dell'artifact. Lo SHA completo della release resta
+obbligatorio: identifica la build autorizzata dal dispatch e deve coincidere con
+prenotazione, provenance, run ID e nome del trasferimento.
+
+La compatibilità degli strumenti è verificata separatamente. Il comando `toolchain`
+calcola un contratto deterministico con versione del protocollo, entry Vite,
+perimetro gestito e SHA-256 dei sei moduli realmente importati: `artifact_transfer_tool.py`,
+`production_publisher.py`, `production_adapter.py`, `baseline_tool.py`, `backup_tool.py`
+e `release_state_tool.py`. Tutti devono essere file regolari nello stesso percorso
+degli strumenti, senza symlink/hardlink. La CI calcola il digest sui propri file
+autorizzati e lo passa via SSH; il server deve riprodurlo prima di ogni operazione.
+Non è sufficiente che il server dichiari una versione compatibile. Un checkout a uno
+SHA diverso funziona se i sei moduli sono identici; se divergono, il trasferimento
+si ferma prima della prenotazione. Non è richiesto un `git pull` applicativo.
+
+### Prerequisito iniziale degli strumenti e controlli IONOS
+
+Il receiver protocollo 2 e i sei moduli devono essere installati una volta tramite
+un'operazione privata autorizzata in `/home/www/sarafatto-repo/scripts/deploy/`.
+La loro installazione o sostituzione non fa parte del job di trasferimento. È
+possibile aggiornare soltanto questi strumenti con copia autenticata e verificata,
+senza cambiare HEAD né pubblicare tema/plugin. Non aggiornarli durante un trasferimento.
+Non usare i nuovi argomenti con il vecchio receiver: se il contratto non coincide,
+installare prima la toolchain revisionata, senza bypassare il confronto degli hash.
+
+Controlli **di sola lettura**, da eseguire manualmente solo dopo autorizzazione:
+
+```sh
+python3 -B /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py toolchain
+python3 -B /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py toolchain \
+  --expected-toolchain-sha256 '<digest del report CI sarafatto-toolchain.json>'
+stat -c '%U %a %F %n' /home/www/sarafatto-deploy /home/www/sarafatto-deploy/staging \
+  /home/www/sarafatto-deploy/state /home/www/sarafatto-deploy/locks \
+  /home/www/sarafatto-deploy/locks/site-operation.lock
+df -Pk /home/www/sarafatto-deploy/staging
+```
+
+Confermare Python POSIX/openat/O_NOFOLLOW, flock esclusivo e fsync (già esercitati
+dai probe), proprietà dell'utente SSH, directory private `0700`, lock `0600`,
+quota sufficiente per archivio più estrazione e che il percorso sia esterno a
+`/home/www/public`. La quota dell'hosting va controllata anche nel pannello IONOS:
+`df` da solo non la dimostra. Per il trasferimento non servono scp, rsync o scritture
+pubbliche. Il requisito `/proc/<pid>/fdinfo` riguarda il prestito del lock nel
+publisher, non la ricezione privata che acquisisce autonomamente il lock.
+
+### Primo collaudo manuale su GitHub
+
+1. Far passare la CI Ubuntu, inclusi i test POSIX di `test_artifact_transfer_tool.py`.
+2. Configurare l'Environment `ionos-private-staging` con revisori obbligatori e
+   accesso limitato a `main`; configurare `IONOS_SSH_PRIVATE_KEY` e
+   `IONOS_SSH_KNOWN_HOSTS`, le variables `IONOS_SSH_HOST`, `IONOS_SSH_USER`,
+   `IONOS_SSH_PORT` e soltanto dopo `IONOS_PRIVATE_STAGING_ENABLED=true`.
+3. Avviare `workflow_dispatch` su `main` con lo SHA completo selezionato e
+   `stage_private_artifact=true`; lasciare gli altri input remoti disattivati.
+4. Approvare il job nell'Environment e controllare il report privato. La CI non
+   chiede di allineare HEAD sul server e non esegue `git pull`.
+
+Il job esegue handshake degli strumenti, prenotazione esclusiva e tre ricezioni
+SSH, ciascuna vincolata a nome fisso e digest prenotato. `O_EXCL` impedisce di
+sostituire file esistenti anche dopo un'interruzione; un payload errato resta
+classificabile come parziale e non viene riutilizzato automaticamente. Non si
+cancellano run precedenti. La prenotazione protocollo 2 lega anche il digest
+della provenance e quello della toolchain. I trasferimenti protocollo 1 non
+vengono migrati o sovrascritti automaticamente.
+
+`publisher-inputs` esegue la verifica completa tramite il verificatore del publisher:
+archivio, inventario, contenuti estratti, manifest Vite e import, provenance e
+identità run. Scrive `TRANSFER_COMPLETE` solo per un artifact valido e restituisce
+i percorsi sotto `staging/incoming/run-<run-id>-<sha12>/`. Ogni richiamo riverifica
+anche i digest ricevuti e i file estratti: un marker preesistente non basta.
+Il report `sarafatto-private-transfer-<run-id>` conserva la compatibilità e gli
+input verificati; nessun risultato parziale viene passato a un job publisher.
+Il publisher continua comunque a verificare i propri input prima dell'uso.
+
+La provenance JSON non è una firma: la provenienza è vincolata allo stesso run
+GitHub, al download artifact di quel run, alla revisione dell'Environment e al
+trasporto SSH con host key già verificata. SSH e handshake reali, configurazione
+dei revisori e disponibilità della toolchain richiedono il primo collaudo IONOS.
+I vecchi comandi separati di ispezione/preflight possono conservare i propri
+vincoli sul repository: non sono invocati da questo percorso di trasferimento.
+`publish`, `rollback` e `recover` pubblici restano disabilitati; il push su main
+non abilita automaticamente lo staging o la pubblicazione.
