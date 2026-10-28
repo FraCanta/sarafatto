@@ -347,7 +347,7 @@ jobs:
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
             "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
-            "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py toolchain --expected-toolchain-sha256 '$TOOLCHAIN_SHA256' && PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py reserve --transfer-id '$transfer_id' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --archive-sha256 '$archive_sha256' --inventory-sha256 '$inventory_sha256' --provenance-sha256 '$provenance_sha256' --toolchain-sha256 '$TOOLCHAIN_SHA256'"
+            "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py toolchain --expected-toolchain-sha256 '$TOOLCHAIN_SHA256' && PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py reserve --transfer-id '$transfer_id' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --archive-sha256 '$archive_sha256' --inventory-sha256 '$inventory_sha256' --provenance-sha256 '$provenance_sha256' --toolchain-sha256 '$TOOLCHAIN_SHA256'"
           echo "transfer_id=$transfer_id" >> "$GITHUB_OUTPUT"
           echo "remote_dir=/home/www/sarafatto-deploy/staging/incoming/$transfer_id" >> "$GITHUB_OUTPUT"
           echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
@@ -368,7 +368,7 @@ jobs:
               -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
               -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
               "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
-              "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py receive --transfer-id '$TRANSFER_ID' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --toolchain-sha256 '$TOOLCHAIN_SHA256' --name '$name'" \
+              "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py receive --transfer-id '$TRANSFER_ID' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --toolchain-sha256 '$TOOLCHAIN_SHA256' --name '$name'" \
               < "$RUNNER_TEMP/sarafatto-transfer/$name"
           done
       - name: Verifica sul server e chiude il trasferimento privato
@@ -387,7 +387,7 @@ jobs:
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_FILE" -o ConnectTimeout=15 \
             "$IONOS_SSH_USER@$IONOS_SSH_HOST" \
-            "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py publisher-inputs --transfer-id '$TRANSFER_ID' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --toolchain-sha256 '$TOOLCHAIN_SHA256'" \
+            "PYTHONDONTWRITEBYTECODE=1 python3 /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py publisher-inputs --transfer-id '$TRANSFER_ID' --release-sha '$GITHUB_SHA' --run-id '$GITHUB_RUN_ID' --toolchain-sha256 '$TOOLCHAIN_SHA256'" \
             | tee "$RUNNER_TEMP/sarafatto-transfer-report.json"
           python3 -c 'import json,os,sys; r=json.load(open(os.environ["RUNNER_TEMP"]+"/sarafatto-transfer-report.json")); ok=r["status"] == "verified-private-artifact" and r["public_writes_performed"] is False and r["release_sha"] == os.environ["GITHUB_SHA"] and r["run_id"] == os.environ["GITHUB_RUN_ID"] and r["toolchain_sha256"] == os.environ["TOOLCHAIN_SHA256"]; sys.exit(0 if ok else "Report trasferimento non corrispondente al run autorizzato")'
       - name: Conserva report di compatibilità e trasferimento

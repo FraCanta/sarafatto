@@ -604,18 +604,24 @@ si ferma prima della prenotazione. Non è richiesto un `git pull` applicativo.
 ### Prerequisito iniziale degli strumenti e controlli IONOS
 
 Il receiver protocollo 2 e i sei moduli devono essere installati una volta tramite
-un'operazione privata autorizzata in `/home/www/sarafatto-repo/scripts/deploy/`.
+un'operazione privata autorizzata in `/home/www/sarafatto-deploy/tools/scripts/deploy/`.
 La loro installazione o sostituzione non fa parte del job di trasferimento. È
 possibile aggiornare soltanto questi strumenti con copia autenticata e verificata,
-senza cambiare HEAD né pubblicare tema/plugin. Non aggiornarli durante un trasferimento.
+senza cambiare HEAD né pubblicare tema/plugin. Il workflow invoca qui tutte le
+operazioni remote di staging (`toolchain`, `reserve`, `receive`, `publisher-inputs`),
+senza accedere al checkout Git IONOS. Non aggiornarli durante un trasferimento.
+Gli import dei sei moduli sono risolti dalla directory dello script; il contratto
+usa i loro nomi e contenuti, non il percorso assoluto di installazione. I percorsi
+privati di staging e lock restano `/home/www/sarafatto-deploy/staging` e
+`/home/www/sarafatto-deploy/locks`, indipendentemente dalla directory corrente.
 Non usare i nuovi argomenti con il vecchio receiver: se il contratto non coincide,
 installare prima la toolchain revisionata, senza bypassare il confronto degli hash.
 
 Controlli **di sola lettura**, da eseguire manualmente solo dopo autorizzazione:
 
 ```sh
-python3 -B /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py toolchain
-python3 -B /home/www/sarafatto-repo/scripts/deploy/artifact_transfer_tool.py toolchain \
+python3 -B /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py toolchain
+python3 -B /home/www/sarafatto-deploy/tools/scripts/deploy/artifact_transfer_tool.py toolchain \
   --expected-toolchain-sha256 '<digest del report CI sarafatto-toolchain.json>'
 stat -c '%U %a %F %n' /home/www/sarafatto-deploy /home/www/sarafatto-deploy/staging \
   /home/www/sarafatto-deploy/state /home/www/sarafatto-deploy/locks \
