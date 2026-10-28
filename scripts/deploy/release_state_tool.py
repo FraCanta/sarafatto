@@ -627,6 +627,26 @@ def make_application_release_plan(current_state, candidate_reference_files, oper
     return plan, digest_json(plan)
 
 
+def _application_release_parent(current_state):
+    """Restituisce il parent canonico della catena, distinto dal digest del documento."""
+    validate_state_document(current_state)
+    chain = current_state.get("release_chain")
+    if chain is None:
+        root = {"kind": "bootstrap-root", "release_id": current_state["release"]["release_id"],
+                "commit_sha": current_state["release"]["commit_sha"],
+                "inventory_tool_commit": current_state["release"]["inventory_tool_commit"],
+                "inventory_sha256": current_state["inventory_sha256"],
+                "source_state_sha256": current_state["state_sha256"],
+                "reference_files": current_state["reference_files"],
+                "component_migration": current_state.get("component_migration")}
+        root["entry_sha256"] = digest_json(root)
+        entries = []
+    else:
+        root, entries = chain["root"], list(chain["entries"])
+    parent_sha = entries[-1]["entry_sha256"] if entries else root["entry_sha256"]
+    return root, entries, parent_sha
+
+
 def build_application_release_state(current_state, *, release_id, commit_sha, inventory_tool_commit,
                                     operation_id, operation_kind, artifact_sha256, backup,
                                     reference_files, plan, rollback_target_release_id=None,
@@ -667,20 +687,7 @@ def build_application_release_state(current_state, *, release_id, commit_sha, in
             or not BACKUP_ID_RE.fullmatch(str(backup.get("backup_id", "")))
             or not re.fullmatch(r"[a-f0-9]{64}", str(backup.get("manifest_sha256", "")))):
         raise ReleaseStateError("Backup non riferito esattamente alla release parent corrente.")
-    chain = current_state.get("release_chain")
-    if chain is None:
-        root = {"kind": "bootstrap-root", "release_id": current_state["release"]["release_id"],
-                "commit_sha": current_state["release"]["commit_sha"],
-                "inventory_tool_commit": current_state["release"]["inventory_tool_commit"],
-                "inventory_sha256": current_state["inventory_sha256"],
-                "source_state_sha256": current_state["state_sha256"],
-                "reference_files": current_state["reference_files"],
-                "component_migration": current_state.get("component_migration")}
-        root["entry_sha256"] = digest_json(root)
-        entries = []
-    else:
-        root, entries = chain["root"], list(chain["entries"])
-    parent_state_sha256 = entries[-1]["entry_sha256"] if entries else root["entry_sha256"]
+    root, entries, parent_state_sha256 = _application_release_parent(current_state)
     record = {"schema_version": 1, "generation": len(entries) + 1,
               "operation_id": operation_id, "operation_kind": operation_kind,
               "release_id": release_id, "commit_sha": commit_sha,
@@ -1449,7 +1456,9 @@ def append_verified_recovery_completion(operation_id, expected_parent_state_sha2
         if not operation or operation[-1]["status"] != "recovery_required":
             raise ReleaseStateError("La transazione non è in stato recovery_required.")
         prepared = operation[0]["details"]
-        if (prepared.get("parent_state_sha256") != expected_parent_state_sha256
+        _, _, parent_chain_sha = _application_release_parent(parent)
+        if (prepared.get("parent_document_sha256") != expected_parent_state_sha256
+                or prepared.get("parent_state_sha256") != parent_chain_sha
                 or prepared.get("backup_id") != backup_id
                 or prepared.get("backup_manifest_sha256") != backup_manifest_sha256
                 or restored_inventory_sha256 != parent["inventory_sha256"]):

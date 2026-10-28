@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test offline del validatore artefatto di produzione (nessun filesystem IONOS)."""
 
+import copy
 import hashlib
 import json
 import os
@@ -75,6 +76,146 @@ class ProductionArtifactTests(unittest.TestCase):
             self.package, self.inventory, release_sha,
             provenance_path=self.provenance, archive_path=self.archive,
             expected_run_id=run_id)
+
+    @staticmethod
+    def _rehash_journal(events):
+        previous = "0" * 64
+        for event in events:
+            event["previous_event_sha256"] = previous
+            event.pop("event_sha256", None)
+            event["event_sha256"] = publisher.release_state_tool.digest_json(event)
+            previous = event["event_sha256"]
+        return events
+
+    def _journal_with_publisher_intent(self, parent, candidate):
+        state_tool = publisher.release_state_tool
+        entry = candidate["release_chain"]["entries"][-1]
+        events = release_state_fixtures._journal_for(candidate)
+        operation = events[-6:]
+        operation[0]["details"] = publisher._prepared_release_details(
+            parent, operation_kind=entry["operation_kind"], release_id=entry["release_id"],
+            commit_sha=entry["commit_sha"], artifact_sha256=entry["artifact_sha256"],
+            backup_reference=entry["backup"], plan=entry["plan"], manifest_sha256="1" * 64)
+        operation[2]["details"] = {"plan_sha256": entry["plan_sha256"]}
+        operation[3]["details"] = {"final_inventory_sha256": entry["inventory_sha256"]}
+        operation[4]["details"] = {
+            "health_evidence_sha256": entry["health_evidence_sha256"],
+            "candidate_state_sha256": hashlib.sha256(state_tool.json_bytes(candidate)).hexdigest(),
+        }
+        return self._rehash_journal(events)
+
+    def test_journal_publisher_distingue_parent_catena_e_documento(self):
+        state_tool = publisher.release_state_tool
+        fixtures = release_state_fixtures
+        a = fixtures._state_a()
+        b = fixtures._transition(a, "txn-b", "release-b", fixtures.COMMIT_B, "B")
+        c = fixtures._transition(b, "txn-c", "release-c", fixtures.COMMIT_C, "C")
+        plan, _ = state_tool.make_application_release_plan(
+            c, b["reference_files"], "txn-r", operation_kind="rollback",
+            rollback_target_release_id="release-b")
+        rollback = state_tool.build_application_release_state(
+            c, release_id="rollback-b", commit_sha=fixtures.COMMIT_B,
+            inventory_tool_commit=fixtures.TOOL_SHA, operation_id="txn-r", operation_kind="rollback",
+            artifact_sha256=None, backup=fixtures._backup_for(c, 4), reference_files=b["reference_files"],
+            plan=plan, rollback_target_release_id="release-b", health_evidence_sha256="9" * 64)
+        for parent, candidate in ((a, b), (b, c), (c, rollback)):
+            with self.subTest(release=candidate["release"]["release_id"]):
+                events = self._journal_with_publisher_intent(parent, candidate)
+                entry = candidate["release_chain"]["entries"][-1]
+                prepared = events[-6]["details"]
+                self.assertNotEqual(entry["parent_state_sha256"], parent["state_sha256"])
+                self.assertEqual(prepared["parent_state_sha256"], entry["previous_entry_sha256"])
+                self.assertEqual(prepared["parent_document_sha256"], parent["state_sha256"])
+                expected = copy.deepcopy(fixtures._journal_for(candidate)[-6]["details"])
+                del expected["entry_sha256"], expected["final_inventory_sha256"]
+                expected["transaction_manifest_sha256"] = "1" * 64
+                self.assertEqual(prepared, expected)
+                self.assertTrue(state_tool.validate_application_release_journal(candidate, events))
+
+    def test_journal_publisher_rifiuta_parent_confusi_e_dettagli_intermedi_alterati(self):
+        fixtures = release_state_fixtures
+        a = fixtures._state_a()
+        b = fixtures._transition(a, "txn-b", "release-b", fixtures.COMMIT_B, "B")
+        events = self._journal_with_publisher_intent(a, b)
+        mutations = (
+            (0, "parent_state_sha256", a["state_sha256"]),
+            (0, "parent_document_sha256", b["release_chain"]["root"]["entry_sha256"]),
+            (0, "parent_release_id", "release-estranea"),
+            (0, "operation_kind", "rollback"),
+            (0, "transaction_manifest_sha256", "digest-non-valido"),
+            (1, "manifest_sha256", "0" * 64),
+            (2, "plan_sha256", "0" * 64),
+            (3, "final_inventory_sha256", "0" * 64),
+            (4, "health_evidence_sha256", "0" * 64),
+        )
+        for index, field, value in mutations:
+            with self.subTest(event=index, field=field):
+                altered = copy.deepcopy(events)
+                altered[index]["details"][field] = value
+                self._rehash_journal(altered)
+                with self.assertRaises(publisher.release_state_tool.ReleaseStateError):
+                    publisher.release_state_tool.validate_application_release_journal(b, altered)
+        for missing in range(5):
+            with self.subTest(missing_event=missing):
+                incomplete = copy.deepcopy(events)
+                del incomplete[missing]
+                with self.assertRaises(publisher.release_state_tool.ReleaseStateError):
+                    publisher.release_state_tool.validate_application_release_journal(b, incomplete)
+        for scenario in ("operation-id", "event-order"):
+            with self.subTest(scenario=scenario):
+                altered = copy.deepcopy(events)
+                if scenario == "operation-id":
+                    altered[2]["operation_id"] = "txn-estranea"
+                else:
+                    altered[2], altered[3] = altered[3], altered[2]
+                self._rehash_journal(altered)
+                with self.assertRaises(publisher.release_state_tool.ReleaseStateError):
+                    publisher.release_state_tool.validate_application_release_journal(b, altered)
+
+    def test_piano_rollback_bundle_nuovo_richiede_rimozione_esatta(self):
+        fixtures = release_state_fixtures
+        state_tool = publisher.release_state_tool
+        a = fixtures._state_a()
+        new_path = "themes/sarafatto/assets/dist/assets/chunk-B.js"
+        records = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                   for row in a["reference_files"] if row["classification"] == "artifact"}
+        records[new_path] = {"sha256": "1" * 64, "size": 1, "mode": "644"}
+        publish_plan = publisher.make_release_state_plan(a, records, "txn-b")
+        b = state_tool.build_application_release_state(
+            a, release_id="release-b", commit_sha=fixtures.COMMIT_B,
+            inventory_tool_commit=fixtures.TOOL_SHA, operation_id="txn-b", operation_kind="publish",
+            artifact_sha256="f" * 64, backup=fixtures._backup_for(a, 1),
+            reference_files=publish_plan["candidate_reference_files"], plan=publish_plan["plan"],
+            health_evidence_sha256="9" * 64)
+        target = {row["path"]: {key: row[key] for key in ("sha256", "size", "mode")}
+                  for row in a["reference_files"]}
+        removals = [{"path": new_path, "sha256": "1" * 64}]
+        approval = {"approval_id": "approve-r", "reviewer": "fixture",
+                    "approved_at_utc": "2026-10-28T10:00:00Z",
+                    "parent_release_id": b["release"]["release_id"],
+                    "parent_inventory_sha256": b["inventory_sha256"],
+                    "removals_sha256": state_tool.digest_json(removals)}
+        kwargs = {"operation_kind": "rollback", "rollback_target_release_id": a["release"]["release_id"]}
+        result = publisher.make_release_state_plan(
+            b, target, "txn-r", approved_removals=removals, removal_approval=approval, **kwargs)
+        self.assertEqual(result["candidate_reference_files"], a["reference_files"])
+        self.assertEqual(result["plan"]["approved_removals"], removals)
+        self.assertEqual(len([row for row in result["candidate_reference_files"]
+                              if row["classification"] != "artifact"]), 9)
+        rollback = state_tool.build_application_release_state(
+            b, release_id="rollback-a", commit_sha=fixtures.COMMIT_A,
+            inventory_tool_commit=fixtures.COMMIT_A, operation_id="txn-r", operation_kind="rollback",
+            artifact_sha256=None, backup=fixtures._backup_for(b, 2),
+            reference_files=result["candidate_reference_files"], plan=result["plan"],
+            rollback_target_release_id=a["release"]["release_id"], health_evidence_sha256="9" * 64)
+        self.assertTrue(state_tool.validate_application_release_journal(
+            rollback, self._journal_with_publisher_intent(b, rollback)))
+        with self.assertRaises(state_tool.ReleaseStateError):
+            publisher.make_release_state_plan(b, target, "txn-r", **kwargs)
+        wrong = [{"path": new_path, "sha256": "0" * 64}]
+        with self.assertRaises(state_tool.ReleaseStateError):
+            publisher.make_release_state_plan(b, target, "txn-r", approved_removals=wrong,
+                                              removal_approval=approval, **kwargs)
 
     def _fake_wp_a(self, root):
         content = {

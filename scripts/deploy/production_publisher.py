@@ -437,7 +437,9 @@ def make_release_state_plan(current_state, artifact_records, operation_id, *,
     for path, row in current_rows.items():
         # I bundle Vite hashati omessi dalla build restano disponibili per cache
         # HTML e client che li richiedano durante o subito dopo il rilascio.
-        if (path.startswith("themes/sarafatto/assets/dist/")
+        # Un rollback deve coincidere con lo snapshot storico: i bundle nuovi
+        # della release abbandonata sono rimossi solo con approvazione esatta.
+        if (operation_kind == "publish" and path.startswith("themes/sarafatto/assets/dist/")
                 and path not in candidate_rows):
             retained = dict(row)
             retained["classification"] = "retained-vite-bundle"
@@ -1010,6 +1012,24 @@ def _verify_backup_for_parent(private, parent_state, backup_reference):
         os.close(backup_fd)
 
 
+def _prepared_release_details(current_state, *, operation_kind, release_id, commit_sha,
+                              artifact_sha256, backup_reference, plan, manifest_sha256):
+    """Serializza l'intento con i distinti digest di catena e documento parent."""
+    _, _, parent_chain_sha = release_state_tool._application_release_parent(current_state)
+    return {
+        "operation_kind": operation_kind, "release_id": release_id,
+        "commit_sha": commit_sha, "artifact_sha256": artifact_sha256,
+        "plan_sha256": release_state_tool.digest_json(plan),
+        "backup_id": backup_reference["backup_id"],
+        "backup_manifest_sha256": backup_reference["manifest_sha256"],
+        "parent_release_id": current_state["release"]["release_id"],
+        "parent_inventory_sha256": current_state["inventory_sha256"],
+        "parent_state_sha256": parent_chain_sha,
+        "parent_document_sha256": current_state["state_sha256"], "plan": plan,
+        "transaction_manifest_sha256": manifest_sha256,
+    }
+
+
 def _run_filesystem_release_transaction(*, operation_kind, operation_id, release_id,
                                         commit_sha, inventory_tool_commit, artifact_sha256,
                                         source_root, candidate_rows, plan, rollback_target_release_id,
@@ -1049,6 +1069,9 @@ def _run_filesystem_release_transaction(*, operation_kind, operation_id, release
 
         backup_reference = _backup_release_reference(current_state, backup_result)
         plan_sha = release_state_tool.digest_json(plan)
+        # Nel manifest privato schema 1 parent_state_sha256 identifica il
+        # documento current-release; nel journal è parent_document_sha256.
+        # Il parent_state_sha256 del journal identifica invece la voce di catena.
         manifest = {
             "schema_version": 1, "operation_id": operation_id, "operation_kind": operation_kind,
             "release_id": release_id, "commit_sha": commit_sha,
@@ -1065,17 +1088,10 @@ def _run_filesystem_release_transaction(*, operation_kind, operation_id, release
         manifest_raw = release_state_tool.json_bytes(manifest)
         manifest_name = f"transaction-{operation_id}.json"
         manifest_sha = _write_private_file_at(transaction_dir_fd, manifest_name, manifest_raw)
-        entry_fields = {
-            "operation_kind": operation_kind, "release_id": release_id,
-            "commit_sha": commit_sha, "artifact_sha256": artifact_sha256,
-            "plan_sha256": plan_sha, "backup_id": backup_reference["backup_id"],
-            "backup_manifest_sha256": backup_reference["manifest_sha256"],
-            "parent_release_id": backup_reference["release_id"],
-            "parent_inventory_sha256": backup_reference["inventory_sha256"],
-            "parent_state_sha256": parent_state_sha,
-            "parent_document_sha256": parent_state_sha, "plan": plan,
-            "transaction_manifest_sha256": manifest_sha,
-        }
+        entry_fields = _prepared_release_details(
+            current_state, operation_kind=operation_kind, release_id=release_id,
+            commit_sha=commit_sha, artifact_sha256=artifact_sha256,
+            backup_reference=backup_reference, plan=plan, manifest_sha256=manifest_sha)
         release_state_tool.append_operation_event(
             state_fd, locks_fd, operation_id, "prepared", entry_fields, lock_fd=lock_fd)
         prepared_written = True
@@ -1395,7 +1411,7 @@ def recover_filesystem_release(*, operation_id, private_root, expected_private_r
                 or manifest["public_root"] != str(pathlib.Path(public_root))
                 or release_state_tool.digest_json(manifest["plan"]) != manifest["plan_sha256"]):
             raise PublisherError("Manifest recovery non corrispondente a operazione, parent o destinazione.")
-        if (prepared.get("parent_state_sha256") != manifest["parent_state_sha256"]
+        if (prepared.get("parent_document_sha256") != manifest["parent_state_sha256"]
                 or prepared.get("parent_release_id") != manifest["parent_release_id"]
                 or prepared.get("parent_inventory_sha256") != manifest["parent_inventory_sha256"]):
             raise PublisherError("Manifest recovery non corrisponde all'intento nel journal.")
@@ -1414,6 +1430,9 @@ def recover_filesystem_release(*, operation_id, private_root, expected_private_r
         if (manifest["parent_release_id"] != current["release"]["release_id"]
                 or manifest["parent_inventory_sha256"] != current["inventory_sha256"]):
             raise PublisherError("Manifest recovery parent diverso dal current-release.")
+        _, _, parent_chain_sha = release_state_tool._application_release_parent(current)
+        if prepared.get("parent_state_sha256") != parent_chain_sha:
+            raise PublisherError("Parent della catena nel journal recovery diverso dal current-release.")
         backup_reference = manifest["backup"]
         baseline_sha = current["initial_baseline"]["sha256"]
         _verify_backup_for_parent(private, current, backup_reference)
