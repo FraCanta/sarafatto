@@ -945,3 +945,58 @@ migrazione separata conclusa e stato verificato, backup fresco con restore-test,
 piano esatto senza rimozioni inattese, nove extra conservati, approvazione legata
 a SHA+artifact+parent+operation ID, recovery collaudato e revisione Environment.
 Nessun semplice flag o successo di questo job sostituisce tali requisiti.
+
+## Revisione locale del verificatore e del recovery transazionale
+
+Il protocollo esistente distingue tre digest: `parent_document_sha256` identifica
+il documento current-release precedente; `parent_state_sha256` negli eventi
+identifica la voce precedente della catena; `transaction_manifest_sha256` vincola
+il manifest privato all'intento prepared. Nel manifest transazione schema 1 il
+campo storico `parent_state_sha256` indica invece il documento: questa differenza
+è preservata e verificata, non risolta rinominando lo schema installato.
+
+Sequenza normale: prepared → backup_verified → publishing → files_verified →
+health_verified → release_committed (o release_rolled_back) → promozione atomica
+del solo current-release. Il terminale precede intenzionalmente la promozione:
+un crash fra questi due punti deve lasciare il sito bloccato alle nuove operazioni,
+non dichiarare automaticamente valido lo stato precedente.
+
+Il recovery isolato gestisce:
+
+- Prima del terminale: verifica baseline, parent, digest del manifest, backup e
+  snapshot estratto; ammette soltanto hash parent/candidato e ripristina il parent.
+  Due inventari freschi e health positivo precedono recovery_completed.
+- Dopo il terminale ma prima della promozione: richiede candidato privato vincolato
+  al journal, inventari freschi e health nuovo, poi completa soltanto lo stato.
+- Stato già promosso: verifica nuovamente baseline su disco, journal e inventari.
+- Recovery già conclusa: verifica baseline, backup/snapshot e journal, riesegue
+  health e due inventari live; restituisce already-recovered senza nuove scritture.
+  Un drift successivo o health negativo non viene mascherato dall'idempotenza.
+
+La persistenza dello stato applica il controllo della baseline anche nel ramo
+already-promoted. I nomi delle letture private sono componenti singoli limitati:
+traversal, nomi assoluti e separatori vengono rifiutati prima di os.open.
+
+I nuovi test offline coprono il rifiuto dei nomi privati; quelli POSIX su directory
+temporanee aggiungono crash dopo prepared, publishing e health_verified,
+recovery ripetuta senza scritture, drift dopo recovery, health negativo e baseline
+alterata dopo una promozione. Restano attivi i test esistenti per terminali
+incoerenti, parent/candidato, alterazione artifact, rollback, lock occupato,
+crash dopo scritture e dopo terminale, e conservazione dei nove extra.
+La fault injection tramite BaseException verifica punti logici di interruzione;
+non dimostra durabilità dopo perdita di alimentazione o semantica del filesystem
+IONOS. Non equivale a un test SIGKILL del processo o a una prova PHP-FPM.
+
+Questa revisione non modifica workflow, Environment, allowlist o gate pubblici.
+Modificando production_publisher e release_state_tool cambia il digest della
+toolchain: per un'eventuale installazione futura occorrono nuova CI, pacchetto
+revisionato e pin autorizzato indipendentemente. Il digest già installato resta
+valido esclusivamente per i vecchi byte; non aggiornarlo implicitamente.
+Gli schemi baseline, backup e current-release non cambiano. Nessun backup o stato
+remoto viene riscritto e nessun comando pubblico viene abilitato.
+
+Prima di un rilascio reale servono CI Ubuntu senza skip critici, collaudo privato
+del nuovo pacchetto su IONOS, fault injection di processo e test di recovery
+interrotto, più le prove HTTP/PHP, shutdown e OPcache della sezione Fase 4B.
+Una catena SHA-256 dimostra coerenza, non autenticità contro chi può riscrivere
+interamente l'area privata: proprietà, permessi e pin esterno restano necessari.

@@ -77,6 +77,33 @@ class ProductionArtifactTests(unittest.TestCase):
             provenance_path=self.provenance, archive_path=self.archive,
             expected_run_id=run_id)
 
+    def test_lettura_manifest_privato_rifiuta_traversal_prima_di_open(self):
+        for name in ("../baseline.json", "/tmp/transaction.json", "nested/file.json", ".", "..", "", None):
+            with self.subTest(name=name), mock.patch.object(publisher.os, "open") as opened:
+                with self.assertRaisesRegex(publisher.PublisherError, "Nome file transazione"):
+                    publisher._read_private_file_at(-1, name)
+                opened.assert_not_called()
+
+    def test_verifica_snapshot_rilegge_due_inventari_e_rifiuta_drift(self):
+        state = release_state_fixtures._state_a()
+        lines = ["EXCLUDED\tthemes/sarafatto/node_modules\t91\t2\n"]
+        lines.extend(f"FILE\t{row['sha256']}\t{row['size']}\t{row['mode']}\t{row['path']}\n"
+                     for row in state["reference_files"])
+        text = "".join(lines) + "END\n"
+        reader = mock.Mock(return_value=text)
+        result = publisher._verify_fresh_snapshot(
+            reader, state["release"]["inventory_tool_commit"], state["reference_files"],
+            state["inventory"]["exclusion"], state["inventory_sha256"])
+        self.assertEqual(reader.call_count, 2)
+        self.assertEqual(result["files"], state["inventory"]["files"])
+        altered = text.replace(state["reference_files"][0]["sha256"], "0" * 64, 1)
+        reader = mock.Mock(side_effect=[text, altered])
+        with self.assertRaises(publisher.PublisherError):
+            publisher._verify_fresh_snapshot(
+                reader, state["release"]["inventory_tool_commit"], state["reference_files"],
+                state["inventory"]["exclusion"], state["inventory_sha256"])
+        self.assertEqual(reader.call_count, 2)
+
     @staticmethod
     def _rehash_journal(events):
         previous = "0" * 64
@@ -336,6 +363,124 @@ class ProductionArtifactTests(unittest.TestCase):
             rollback_health_check=lambda: {"status": "healthy", "check": "fixture-parent"},
             inventory_reader=reader, approved_removals=removals,
             removal_approval=approval, fault_hook=fault_hook)
+
+    def _recover_fixture_b(self, fixture, *, health_check=None):
+        return publisher.recover_filesystem_release(
+            operation_id="publish-B-fixture", private_root=fixture.private,
+            expected_private_root=fixture.private, public_root=fixture.public,
+            expected_public_root=fixture.public, quota_free_bytes=10**10,
+            health_check=health_check or (lambda: {"status": "healthy"}),
+            inventory_reader=self._inventory_reader(fixture.public))
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Recovery idempotente richiede filesystem POSIX.")
+    def test_recovery_ripetuta_verifica_live_health_e_non_scrive(self):
+        fixture = self._release_fixture()
+
+        class Crash(BaseException):
+            pass
+
+        def crash(event, _path, count):
+            if event == "after-file" and count == 2:
+                raise Crash()
+
+        with self.assertRaises(Crash):
+            self._publish_fixture_b(fixture, fault_hook=crash)
+        self.assertEqual(self._recover_fixture_b(fixture)["status"], "recovery_completed")
+        state_path = fixture.state / publisher.release_state_tool.STATE_NAME
+        state_before, events_before = state_path.read_bytes(), self._journal_events(fixture)
+        live_before = publisher.inventory_target_tree(fixture.public)
+        result = self._recover_fixture_b(fixture)
+        self.assertEqual(result["status"], "already-recovered")
+        self.assertFalse(result["public_writes_performed"])
+        self.assertEqual(publisher.inventory_target_tree(fixture.public), live_before)
+        with self.assertRaises(publisher.PublisherError):
+            self._recover_fixture_b(fixture, health_check=lambda: {"status": "unhealthy"})
+        changed = fixture.public / "themes/sarafatto/functions.php"
+        changed.write_bytes(b"external edit after recovery")
+        with self.assertRaises(publisher.PublisherError):
+            self._recover_fixture_b(fixture)
+        self.assertEqual(changed.read_bytes(), b"external edit after recovery")
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(self._journal_events(fixture), events_before)
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Fault injection recovery richiede filesystem POSIX.")
+    def test_recovery_crash_prepared_publishing_health_verifica_parent_ed_extra(self):
+        class Crash(BaseException):
+            pass
+
+        for point in ("after-prepared", "after-publishing", "after-health-verified"):
+            with self.subTest(point=point):
+                fixture = self._release_fixture()
+                before = publisher.inventory_target_tree(fixture.public)
+                state_path = fixture.state / publisher.release_state_tool.STATE_NAME
+                state_before = state_path.read_bytes()
+
+                def crash(event, _path, _count):
+                    if event == point:
+                        raise Crash()
+
+                with self.assertRaises(Crash):
+                    self._publish_fixture_b(fixture, fault_hook=crash)
+                self.assertEqual(self._recover_fixture_b(fixture)["status"], "recovery_completed")
+                self.assertEqual(publisher.inventory_target_tree(fixture.public), before)
+                self.assertEqual(state_path.read_bytes(), state_before)
+                events = self._journal_events(fixture)
+                self.assertEqual(events[-1]["status"], "recovery_completed")
+                self.assertNotIn("release_committed", [event["status"] for event in events])
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Validazione recovery terminale richiede filesystem POSIX.")
+    def test_recovery_finalizzata_rifiuta_baseline_alterata_senza_scrivere(self):
+        fixture = self._release_fixture()
+        self._publish_fixture_b(fixture)
+        self.assertEqual(self._recover_fixture_b(fixture)["status"], "already-finalized")
+        state_path = fixture.state / publisher.release_state_tool.STATE_NAME
+        state_before = state_path.read_bytes()
+        events_before = self._journal_events(fixture)
+        live_before = publisher.inventory_target_tree(fixture.public)
+        fixture.baseline_path.write_bytes(fixture.baseline_path.read_bytes() + b" ")
+        with self.assertRaisesRegex(publisher.PublisherError, "baseline"):
+            self._recover_fixture_b(fixture)
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(self._journal_events(fixture), events_before)
+        self.assertEqual(publisher.inventory_target_tree(fixture.public), live_before)
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+                         "Tampering dopo crash richiede filesystem POSIX.")
+    def test_recovery_rifiuta_manifest_backup_e_candidato_alterati_senza_scrivere(self):
+        class Crash(BaseException):
+            pass
+
+        for tamper in ("manifest", "backup", "candidate"):
+            with self.subTest(tamper=tamper):
+                fixture = self._release_fixture()
+
+                def crash(event, _path, _count):
+                    if event == "after-terminal":
+                        raise Crash()
+
+                with self.assertRaises(Crash):
+                    self._publish_fixture_b(fixture, fault_hook=crash)
+                transactions = fixture.private / "staging" / "transactions"
+                manifest_path = transactions / "transaction-publish-B-fixture.json"
+                manifest = json.loads(manifest_path.read_bytes())
+                if tamper == "manifest":
+                    damaged = manifest_path
+                elif tamper == "backup":
+                    damaged = fixture.private / "backups" / manifest["backup"]["backup_id"] / "payload.tar.gz"
+                else:
+                    damaged = transactions / "candidate-publish-B-fixture.json"
+                damaged.write_bytes(damaged.read_bytes() + b"altered")
+                live_before = publisher.inventory_target_tree(fixture.public)
+                state_path = fixture.state / publisher.release_state_tool.STATE_NAME
+                state_before, events_before = state_path.read_bytes(), self._journal_events(fixture)
+                with self.assertRaises(publisher.PublisherError):
+                    self._recover_fixture_b(fixture)
+                self.assertEqual(publisher.inventory_target_tree(fixture.public), live_before)
+                self.assertEqual(state_path.read_bytes(), state_before)
+                self.assertEqual(self._journal_events(fixture), events_before)
 
     @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
                          "Orchestrazione reale su filesystem richiede POSIX e openat.")

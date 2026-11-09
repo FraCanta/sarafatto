@@ -799,6 +799,11 @@ def persist_verified_application_release_state(candidate, expected_previous_stat
         else:
             baseline.validate_baseline_lock(lock_fd, locks_fd)
         current = load_current_state(state_fd, candidate["initial_baseline"]["sha256"])
+        raw_baseline = _read_at(state_fd, "baseline.json", "Baseline", MAX_STATE_BYTES)
+        expected_baseline = baseline_sha256 or candidate["initial_baseline"]["sha256"]
+        if (hashlib.sha256(raw_baseline).hexdigest() != expected_baseline
+                or candidate["initial_baseline"]["sha256"] != expected_baseline):
+            raise ReleaseStateError("Baseline storica immutabile non corrispondente.")
         if current["state_sha256"] == candidate["state_sha256"]:
             events = read_journal_at(state_fd)
             validate_application_release_journal(current, events)
@@ -819,11 +824,6 @@ def persist_verified_application_release_state(candidate, expected_previous_stat
                 or entries[-1]["parent_release_id"] != current["release"]["release_id"]
                 or entries[-1]["parent_inventory_sha256"] != current["inventory_sha256"]):
             raise ReleaseStateError("Candidate non è la singola transizione successiva allo stato corrente.")
-        raw_baseline = _read_at(state_fd, "baseline.json", "Baseline", MAX_STATE_BYTES)
-        expected_baseline = baseline_sha256 or candidate["initial_baseline"]["sha256"]
-        if (hashlib.sha256(raw_baseline).hexdigest() != expected_baseline
-                or candidate["initial_baseline"]["sha256"] != expected_baseline):
-            raise ReleaseStateError("Baseline storica immutabile non corrispondente.")
         events = read_journal_at(state_fd)
         validate_application_release_journal(candidate, events)
         reader = inventory_reader or baseline.acquire_fresh_inventory

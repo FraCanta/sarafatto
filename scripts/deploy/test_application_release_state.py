@@ -400,6 +400,15 @@ class ApplicationReleaseStateTests(unittest.TestCase):
                 b, a["state_sha256"], private_root=private, expected_root=private,
                 baseline_sha256=baseline_sha, inventory_reader=reader)
             self.assertEqual(repeated["status"], "already-promoted")
+            promoted_bytes = state_path.read_bytes()
+            journal_bytes = journal_path.read_bytes()
+            baseline_path.write_bytes(baseline_raw + b"tampered")
+            with self.assertRaisesRegex(state_tool.ReleaseStateError, "Baseline storica"):
+                state_tool.persist_verified_application_release_state(
+                    b, a["state_sha256"], private_root=private, expected_root=private,
+                    baseline_sha256=baseline_sha, inventory_reader=reader)
+            self.assertEqual(state_path.read_bytes(), promoted_bytes)
+            self.assertEqual(journal_path.read_bytes(), journal_bytes)
 
     @unittest.skipUnless(os.name == "posix", "Lock flock e fault injection richiedono POSIX.")
     def test_promozione_lock_occupato_o_rename_fallito_non_cambia_lo_stato(self):

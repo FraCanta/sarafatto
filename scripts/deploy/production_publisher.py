@@ -915,6 +915,9 @@ def _write_private_file_at(parent_fd, name, payload):
 
 
 def _read_private_file_at(parent_fd, name):
+    if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,140}", name)
+            or name in (".", "..")):
+        raise PublisherError("Nome file transazione privato non sicuro.")
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         before = os.fstat(fd)
@@ -1381,10 +1384,16 @@ def recover_filesystem_release(*, operation_id, private_root, expected_private_r
         raise PublisherError("Recovery richiede POSIX/O_NOFOLLOW e health check.")
     if pathlib.Path(public_root) != pathlib.Path(expected_public_root):
         raise PublisherError("Root pubblica diversa dal target autorizzato.")
+    if not isinstance(operation_id, str) or not release_state_tool.OPERATION_ID_RE.fullmatch(operation_id):
+        raise PublisherError("Identificativo operazione recovery non valido.")
     private = lock_fd = transaction_dir_fd = None
     try:
         private, lock_fd = _open_release_context(private_root, expected_private_root)
         current = release_state_tool.load_current_state(private["state_fd"])
+        # Anche i rami idempotenti devono verificare la baseline su disco,
+        # senza fidarsi soltanto del digest contenuto in current-release.
+        backup_tool.validate_backup_baseline(
+            None, current["initial_baseline"]["sha256"], state_fd=private["state_fd"])
         events = release_state_tool.read_journal_at(private["state_fd"])
         operation = [event for event in events if event["operation_id"] == operation_id]
         if not operation or operation[0]["status"] != "prepared":
@@ -1482,8 +1491,14 @@ def recover_filesystem_release(*, operation_id, private_root, expected_private_r
 
         if operation_status == "recovery_completed":
             release_state_tool.validate_current_state_journal(current, events)
+            recovery_health, _ = _health_evidence(health_check)
+            _verify_fresh_snapshot(
+                inventory_reader or baseline_tool.acquire_fresh_inventory,
+                current["release"]["inventory_tool_commit"], current["reference_files"],
+                current["inventory"]["exclusion"], current["inventory_sha256"])
             return {"status": "already-recovered", "operation_id": operation_id,
-                    "state_sha256": current["state_sha256"], "public_writes_performed": False}
+                    "state_sha256": current["state_sha256"], "health_evidence": recovery_health,
+                    "public_writes_performed": False}
         if operation_status != "recovery_required":
             release_state_tool.append_operation_event(
                 private["state_fd"], private["locks_fd"], operation_id, "recovery_required",
