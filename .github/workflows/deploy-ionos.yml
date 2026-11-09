@@ -30,6 +30,32 @@ on:
         required: true
         default: false
         type: boolean
+      deploy_theme:
+        description: Prepara il solo tema e richiede approvazione ionos-production (gate inizialmente chiuso)
+        required: true
+        default: false
+        type: boolean
+      theme_removals_json:
+        description: Rimozioni tema esplicite path/sha256; lista vuota per impostazione predefinita
+        required: false
+        default: '[]'
+        type: string
+      theme_recovery_run:
+        description: 'Solo recovery manuale: run originale, lasciare vuoto normalmente'
+        required: false
+        type: string
+      theme_recovery_sha:
+        description: Commit originale della transazione tema da recuperare
+        required: false
+        type: string
+      theme_recovery_attempt:
+        description: Attempt originale della transazione tema da recuperare
+        required: false
+        type: string
+      theme_recovery_review_sha256:
+        description: Digest review originale conservato nel report GitHub
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -39,6 +65,138 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  theme-prepare:
+    needs: [validate, build-artifact]
+    if: vars.IONOS_THEME_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.deploy_theme == true) && inputs.stage_private_artifact != true && !inputs.theme_recovery_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sarafatto-release-${{ github.sha }}
+          path: ${{ runner.temp }}/sarafatto-transfer
+      - name: Trasferimento privato e piano tema senza scritture pubbliche
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          IONOS_SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+          IONOS_THEME_TOOLCHAIN_SHA256: ${{ vars.IONOS_THEME_TOOLCHAIN_SHA256 }}
+          THEME_REMOVALS_JSON: ${{ inputs.theme_removals_json || '[]' }}
+        run: bash scripts/deploy/theme-deploy-ssh.sh prepare
+      - name: Piano esatto da esaminare prima dell'approvazione produzione
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sarafatto-theme-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/theme-review.json
+          if-no-files-found: error
+          retention-days: 30
+
+  theme-publish:
+    needs: [validate, build-artifact, theme-prepare]
+    if: vars.IONOS_THEME_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.deploy_theme == true)
+    runs-on: ubuntu-24.04
+    environment: ionos-production
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sarafatto-theme-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/theme-review
+      - name: Rifiuta una run superata da un nuovo commit main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCTION_REVIEWER: ${{ vars.IONOS_PRODUCTION_REVIEWER }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request,sys
+          sys.path.insert(0,'scripts/deploy')
+          from theme_deploy import require_github_approval,NoRedirect
+          client=urllib.request.build_opener(NoRedirect())
+          review_url='https://api.github.com/repos/FraCanta/sarafatto/actions/runs/'+os.environ['GITHUB_RUN_ID']+'/approvals'
+          request=urllib.request.Request(review_url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with client.open(request,timeout=20) as response: reviews=json.load(response)
+          require_github_approval(reviews,os.environ['PRODUCTION_REVIEWER'])
+          url='https://api.github.com/repos/FraCanta/sarafatto/git/ref/heads/main'
+          request=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with client.open(request,timeout=20) as response: head=json.load(response)['object']['sha']
+          if head!=os.environ['GITHUB_SHA']: raise SystemExit('Run superata: nessuna scrittura pubblica autorizzata')
+          PY
+      - name: Pubblica soltanto il tema con manutenzione e backup verificato
+        env:
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          IONOS_SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+          IONOS_THEME_TOOLCHAIN_SHA256: ${{ vars.IONOS_THEME_TOOLCHAIN_SHA256 }}
+          IONOS_THEME_QUOTA_FREE_BYTES: ${{ vars.IONOS_THEME_QUOTA_FREE_BYTES }}
+        run: bash scripts/deploy/theme-deploy-ssh.sh publish
+      - name: Conserva esito anche quando il deploy fallisce
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sarafatto-theme-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/theme-result.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  theme-recover:
+    needs: [validate, build-artifact]
+    if: github.event_name == 'workflow_dispatch' && inputs.theme_recovery_run != '' && inputs.deploy_theme != true && inputs.stage_private_artifact != true && vars.IONOS_THEME_RECOVERY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: ionos-production
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verifica approvazione esplicita per il recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCTION_REVIEWER: ${{ vars.IONOS_PRODUCTION_REVIEWER }}
+        run: |
+          python3 - <<'PY'
+          import json,os,sys,urllib.request
+          sys.path.insert(0,'scripts/deploy')
+          from theme_deploy import require_github_approval,NoRedirect
+          client=urllib.request.build_opener(NoRedirect())
+          url='https://api.github.com/repos/FraCanta/sarafatto/actions/runs/'+os.environ['GITHUB_RUN_ID']+'/approvals'
+          request=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with client.open(request,timeout=20) as response: reviews=json.load(response)
+          require_github_approval(reviews,os.environ['PRODUCTION_REVIEWER'])
+          PY
+      - name: Recovery esatto della transazione tema autorizzata
+        env:
+          DEPLOY_SHA: ${{ inputs.theme_recovery_sha }}
+          DEPLOY_RUN: ${{ inputs.theme_recovery_run }}
+          DEPLOY_ATTEMPT: ${{ inputs.theme_recovery_attempt }}
+          THEME_RECOVERY_REVIEW_SHA256: ${{ inputs.theme_recovery_review_sha256 }}
+          IONOS_SSH_HOST: ${{ vars.IONOS_SSH_HOST }}
+          IONOS_SSH_PORT: ${{ vars.IONOS_SSH_PORT }}
+          IONOS_SSH_USER: ${{ vars.IONOS_SSH_USER }}
+          IONOS_SSH_PRIVATE_KEY: ${{ secrets.IONOS_SSH_PRIVATE_KEY }}
+          IONOS_SSH_KNOWN_HOSTS: ${{ secrets.IONOS_SSH_KNOWN_HOSTS }}
+          IONOS_THEME_TOOLCHAIN_SHA256: ${{ vars.IONOS_THEME_TOOLCHAIN_SHA256 }}
+          IONOS_THEME_QUOTA_FREE_BYTES: ${{ vars.IONOS_THEME_QUOTA_FREE_BYTES }}
+        run: bash scripts/deploy/theme-deploy-ssh.sh recover
+
   production-authorization-review:
     needs: [validate, build-artifact]
     if: github.event_name == 'workflow_dispatch' && inputs.review_production_readiness == true
@@ -77,6 +235,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash -n scripts/deploy/theme-deploy-ssh.sh
           for script in scripts/deploy/remote-inventory.sh scripts/deploy/compare-remote.sh scripts/deploy/test-preview-fixtures.sh scripts/deploy/init-private-environment.sh scripts/deploy/baseline-inventory.sh scripts/deploy/test-baseline-inventory-fixture.sh; do
             bash -n "$script"
           done
@@ -104,6 +263,8 @@ jobs:
           SARAFATTO_REQUIRE_FLOCK=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_request_barrier_tool.py
           SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_mu_plugin_migration_tool.py
           SARAFATTO_REQUIRE_FLOCK=1 SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_mu_plugin_transaction_fixture_tool.py
+          python3 -c 'import ast,pathlib; [ast.parse((pathlib.Path("scripts/deploy")/p).read_text()) for p in ("theme_deploy.py", "test_theme_deploy.py")]'
+          SARAFATTO_REQUIRE_POSIX=1 PYTHONDONTWRITEBYTECODE=1 python3 scripts/deploy/test_theme_deploy.py
           bash scripts/deploy/test-preview-fixtures.sh
           bash scripts/deploy/test-baseline-inventory-fixture.sh
 

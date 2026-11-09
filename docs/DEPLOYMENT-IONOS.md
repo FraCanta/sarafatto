@@ -1000,3 +1000,160 @@ del nuovo pacchetto su IONOS, fault injection di processo e test di recovery
 interrotto, più le prove HTTP/PHP, shutdown e OPcache della sezione Fase 4B.
 Una catena SHA-256 dimostra coerenza, non autenticità contro chi può riscrivere
 interamente l'area privata: proprietà, permessi e pin esterno restano necessari.
+
+## Percorso operativo separato: solo tema, manutenzione programmata
+
+Questa modalità sostituisce il requisito zero-downtime **soltanto per il tema**.
+Non abilita il vecchio production_publisher CLI e non cambia i suoi gate, la
+barriera MU-plugin o i sette moduli della toolchain installata. Contratto atteso:
+`39bb64633eada2bb9e20a5179830b6d0533db17bbc8d4fe7da6fdc5e68427633`.
+
+Entry point: `scripts/deploy/theme_deploy.py`. Trasporto GitHub:
+`scripts/deploy/theme-deploy-ssh.sh`. Nessun git pull IONOS. L'entrypoint viene
+trasferito separatamente in una directory privata per run, con creazione esclusiva
+e checksum verificato dal runner prima dell'esecuzione. Importa soltanto la
+toolchain privata già installata. Ogni fase confronta prima i sette file remoti
+con i checksum del contratto autorizzato indipendentemente in GitHub.
+
+### Cosa viene realmente pubblicato
+
+Il pacchetto completo del commit/run viene verificato con manifest Vite,
+provenance, digest e archivio. La selezione prende **solo** `themes/sarafatto/`;
+plugin e MU-plugin del pacchetto non vengono applicati. Lo snapshot candidato
+mantiene quelli dello stato parent, verificati live. Anche i nove extra registrati
+restano identici; i vecchi bundle Vite sono mantenuti e classificati dal motore.
+Nessuna cancellazione ricorsiva o rsync --delete. Le altre directory, uploads,
+database e configurazioni sono escluse. Un extra sconosciuto blocca il confronto.
+
+Una release `theme-<commit12>-<run>` registra nel **medesimo current-release**
+la sorgente Git del tema e l'intero inventario risultante; non afferma che plugin
+e MU-plugin siano stati aggiornati a quel commit. Journal, backup e catena degli
+snapshot restano quelli esistenti. Nessuna baseline viene reinizializzata.
+
+Eccezione pubblica temporanea fuori dal tema: `/home/www/public/.maintenance` e il
+suo candidato `.sf-maintenance-<random>` nella stessa directory, necessari alla
+manutenzione WordPress richiesta. Il candidato viene scritto e fsync prima di
+pubblicare il marker tramite hard link no-clobber, poi viene rimosso. Non si espone
+PHP scritto parzialmente e non si sovrascrive una manutenzione già presente.
+Contiene soltanto la finestra dell'operazione, un hash di un token casuale e il
+probe PHP autenticato; nessun segreto in chiaro, database o configurazione viene
+modificato. Viene rimossa solo verificandone contenuto, tipo, ownership e inode.
+
+### Sequenza applicata
+
+1. CI/build dell'esatto commit. `theme-prepare` trasferisce in staging privata con
+   il ricevitore esistente, senza scritture pubbliche, e acquisisce due inventari.
+2. Produce `sarafatto-theme-review-<run>-<attempt>`: commit, parent, digest artifact,
+   piano esatto, rimozioni approvate e digest review. La copia privata 0600 contiene
+   anche il token della manutenzione; il report GitHub **non** lo contiene.
+3. `theme-publish` attende l'approvazione dell'Environment `ionos-production`.
+   Esaminare PR/diff e artifact review PRIMA di approvare. Il job rifiuta uno SHA
+   ormai superato su main. Rilegge review, parent e artifact sotto site-operation.lock.
+4. Il motore già esistente crea un backup fresco dell'intero perimetro registrato,
+   lo verifica e ne fa restore-test privato. Questo backup NON comprende database,
+   upload, core o componenti esterni. Quota e spazio insufficiente bloccano prima
+   delle scritture pubbliche. Registra prepared prima di armare la manutenzione.
+5. Pubblica .maintenance no-clobber dopo scrittura esclusiva/fsync; verifica una risposta PHP web autenticata con
+   nonce nuovo e una risposta anonima 503 con operation ID. Attende 30 secondi di
+   assestamento: **non è una prova di drain**. Poi pubblica asset prima del PHP,
+   sostituendo atomicamente i singoli file e verificando l'intero inventario.
+6. Ricontrolla via web OPcache, attende tre secondi e rimuove il proprio marker.
+   Esegue health HTTP homepage/REST e verifica dimensione/hash degli asset tema
+   attesi via HTTP. Il lock CLI resta mantenuto durante health e conferma della
+   release. Non vengono effettuate scritture CMS/prodotti.
+7. Un health negativo riarma la manutenzione PRIMA del rollback automatico del
+   motore. Il ripristino usa il backup verificato, confronta hash, controlla health
+   e registra recovery_completed senza promuovere la candidata fallita.
+   Se la riconvalida PHP fallisce già all'ingresso, prima che il publishing possa
+   iniziare, ripristina la disponibilità del sito originale se l'health lo conferma.
+
+### OPcache: requisito concreto, rischio accettato
+
+Il probe viene eseguito dal PHP web che include il marker, non dalla CLI. Accetta
+OPcache assente/disabilitato oppure `validate_timestamps=1`, `revalidate_freq=0`,
+`file_cache_only=0`. Configurazioni diverse bloccano il tentativo prima delle
+scritture tema. Non usa opcache_reset CLI e non inferisce cache disabilitata da
+opcache_get_status falso. Occorre confermare sul contratto IONOS la possibilità di
+configurare questi valori nel PHP web, prima del collaudo pubblico autorizzato.
+
+Questa è una strategia esplicita di riconvalida per richiesta con periodo di
+assestamento, NON una garanzia di invalidazione simultanea di tutti i pool. Le
+richieste precedenti al marker, gli accessi che non attraversano WordPress, le
+cache HTTP e worker con configurazioni differenti restano un rischio documentato.
+L'operatrice accetta questo modello per manutenzione occasionale del tema.
+Non estenderlo silenziosamente a plugin o MU-plugin. La vecchia barriera non viene
+attivata né considerata collaudata.
+
+### Configurazione GitHub e primo collaudo
+
+I nuovi gate sono assenti/false per impostazione predefinita: nessuna pubblicazione
+viene attivata da questo checkout. Non sono stati modificati Environment o Secrets
+remoti. Per l'attivazione successiva, dopo CI Ubuntu e autorizzazione:
+
+- Configurare Environment **ionos-production** con revisore obbligatorio (la
+  sviluppatrice), branch main soltanto e protezioni offerte dal piano GitHub.
+  Se il piano non supporta l'approvazione richiesta, non attivare il gate.
+  Un nome Environment nel YAML da solo non impone revisori. Per una sola operatrice
+  verificare che la policy self-review permetta effettivamente la sua approvazione.
+  Impostare `IONOS_PRODUCTION_REVIEWER` al login esatto della sviluppatrice (ad
+  esempio FraCanta). Publish e recovery leggono anche la cronologia approvazioni
+  della run tramite GitHub API e rifiutano Environment senza approvazione esplicita
+  di quel login, un bypass senza review o una cronologia rifiutata/non leggibile.
+  Usano GITHUB_TOKEN con Actions read, non un nuovo PAT. Riferimento API:
+  https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run
+- Riutilizzare `IONOS_SSH_PRIVATE_KEY`, `IONOS_SSH_KNOWN_HOSTS` e le variables
+  `IONOS_SSH_HOST`, `IONOS_SSH_USER`, `IONOS_SSH_PORT`; devono essere disponibili
+  al job di preparazione privata e al job protetto, senza stamparli nei log.
+  La chiave è già privilegiata sul server: proteggere main/workflow e l'accesso ai
+  Secrets; il solo scope del codice non riduce i privilegi Unix di quella chiave.
+- Impostare `IONOS_THEME_TOOLCHAIN_SHA256` al digest completo 39bb6463 sopra e
+  `IONOS_THEME_QUOTA_FREE_BYTES` alla quota libera account appena confermata.
+  Il motore verifica anche lo spazio filesystem; una quota non aggiornata può
+  ancora provocare ENOSPC, che resta un errore bloccante.
+- Dopo collaudo, `IONOS_THEME_DEPLOY_ENABLED=true` permette prepare su push main e
+  dispatch con `deploy_theme=true`; publish resta SEMPRE subordinato a Environment.
+  Per il primo test usare dispatch, SHA esatto main e nessuna rimozione. Non
+  approvare il job pubblico finché non è stata autorizzata la finestra manutenzione.
+  Non combinare deploy_theme con stage_private_artifact o con recovery nello stesso
+  dispatch. Un trasferimento parziale non viene sovrascritto dai rerun: conservare
+  le evidenze e avviare un nuovo dispatch con nuovo run ID dopo la classificazione.
+- Un file sorgente eliminato blocca il piano senza approvazione path+hash. Per
+  approvarlo esplicitamente usare dispatch `theme_removals_json` (array di oggetti
+  `path`, `sha256` del parent), poi revisionare il piano risultante. Su push la
+  lista è vuota. Bundle storici conservati ed extra registrati non sono eliminabili
+  attraverso questo input.
+
+Al termine del collaudo autorizzato, il normale flusso è git push main → CI/build
+→ piano privato → approvazione GitHub → manutenzione/deploy/health/conferma.
+Nessuna operazione SSH ordinaria della sviluppatrice e nessun aggiornamento del
+checkout Git del server. Cambiamenti FUTURI ai sette moduli della toolchain
+richiederanno invece un aggiornamento separato del relativo contratto/pin.
+
+### Crash, recupero e criteri di arresto
+
+Il marker non scade dopo dieci minuti: `$upgrading = time()` lo mantiene attivo
+finché una recovery verificata non lo rimuove. In caso di crash non cancellarlo
+manualmente per far tornare il sito online. Non cancellare staging o backup.
+
+Il job manuale `theme-recover` richiede `IONOS_THEME_RECOVERY_ENABLED=true`,
+Environment produzione, run/SHA/attempt originali e review_sha256 del report.
+Esegue soltanto il recovery della transazione theme-only: ripristina il parent se
+incompleta, oppure finalizza il candidato già terminale dopo nuove verifiche.
+Non equivale a un rollback arbitrario di una release già conclusa.
+Il motore riacquisisce e valida autonomamente il lock durante recovery; nessuna
+scrittura pubblica avviene nel passaggio fra il lock del wrapper e quello del
+motore. Parent modificato, altro journal attivo o marker estraneo bloccano.
+
+Da terminale, SOLO dopo autorizzazione separata, gli stessi comandi sono disponibili
+nel client privato verificato del run: `preflight`, `publish`, `recover`. Non
+accettano root pubbliche configurabili. publish/recover richiedono SHA/run/attempt,
+toolchain pin, review_sha256, quota e conferma letterale
+`theme-only-scheduled-maintenance-nonatomic`. Nessun --force e nessun flag modifica
+PUBLIC_WRITER_ENABLED del publisher precedente.
+
+Fault injection offline copre interruzioni logiche dopo scritture, health negativo,
+backup alterato e lock occupato. SIGKILL/power loss possono lasciare un temporaneo
+`.sf-new-*`: se non è riconducibile ai due snapshot, il recovery esistente rifiuta
+di cancellarlo o sovrascriverlo. Occorrono classificazione privata e intervento
+controllato, non un --delete. Le prove Ubuntu e PHP web IONOS del primo collaudo
+restano obbligatorie; test CLI/locali non dimostrano il comportamento dei pool web.
