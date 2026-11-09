@@ -15,7 +15,7 @@ $worlds = array(
 <section class="home-worlds" aria-labelledby="home-worlds-title">
 	<div class="home-container">
 		<header class="home-worlds__intro">
-			<h2 class="home-section-title" id="home-worlds-title"><?php echo esc_html( sarafatto_theme_label( 'I nostri mondi', 'Our worlds' ) ); ?></h2>
+			<h2 class="home-section-title" id="home-worlds-title"><?php echo esc_html( sarafatto_theme_label( 'Le mie collezioni', 'My collections' ) ); ?></h2>
 		</header>
 		<ul class="home-worlds__grid">
 			<?php foreach ( $worlds as $index => $world ) : ?>

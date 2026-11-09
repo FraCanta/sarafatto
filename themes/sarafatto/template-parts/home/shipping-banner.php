@@ -5,6 +5,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 $image_url = get_theme_file_uri( 'assets/images/home-shipping-banner.webp' );
+$image_widths = array( 480, 768, 1120, 1448 );
+$image_sizes = '(max-width: 63.999rem) 100vw, 50vw';
+$image_srcset = static function ( $format ) use ( $image_widths ) {
+	$sources = array();
+	foreach ( $image_widths as $width ) {
+		$sources[] = get_theme_file_uri( sprintf( 'assets/images/home-shipping-banner-%d.%s', $width, $format ) ) . ' ' . $width . 'w';
+	}
+	return implode( ', ', $sources );
+};
 $english  = function_exists( 'sarafatto_get_current_language' ) && 0 === strpos( sarafatto_get_current_language(), 'en' );
 $alt      = sarafatto_theme_label( 'Primo piano di uno sguardo con un biglietto giallo: “Ti piace? Te lo mando.”', 'Close-up of a playful eye beside a yellow note reading “Ti piace? Te lo mando.”' );
 
@@ -18,7 +27,11 @@ $shipping_url  = $shipping_page instanceof WP_Post ? get_permalink( $shipping_pa
 ?>
 <section class="home-shipping-banner" aria-labelledby="home-shipping-banner-title">
 	<figure class="home-shipping-banner__media">
-		<img class="home-shipping-banner__image" src="<?php echo esc_url( $image_url ); ?>" alt="<?php echo esc_attr( $alt ); ?>" width="1448" height="1086" sizes="(max-width: 63.999rem) 100vw, 57vw" loading="lazy" decoding="async">
+		<picture>
+			<source type="image/avif" srcset="<?php echo esc_attr( $image_srcset( 'avif' ) ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>">
+			<source type="image/webp" srcset="<?php echo esc_attr( $image_srcset( 'webp' ) ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>">
+			<img class="home-shipping-banner__image" src="<?php echo esc_url( $image_url ); ?>" srcset="<?php echo esc_attr( $image_url . ' 1448w' ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>" alt="<?php echo esc_attr( $alt ); ?>" width="1448" height="1086" loading="lazy" decoding="async">
+		</picture>
 	</figure>
 	<div class="home-shipping-banner__content">
 		<p class="home-shipping-banner__eyebrow"><?php echo esc_html( sarafatto_theme_label( 'Anche se sei lontano', 'Even if you are far away' ) ); ?></p>

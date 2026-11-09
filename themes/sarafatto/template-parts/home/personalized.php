@@ -23,6 +23,16 @@ if ( '' === $title ) {
 
 $alt = sarafatto_theme_label( 'T-shirt bianca con il ricamo “Pensati ventenne”', 'White T-shirt embroidered with “Pensati ventenne”' );
 $section_id = 'home-personalized-title';
+$image_url = get_theme_file_uri( 'assets/images/home-personalized-shirt.png' );
+$image_widths = array( 480, 768, 1120, 1448 );
+$image_sizes = '(max-width: 47.999rem) min(calc(100vw - 2.25rem), 30rem), (max-width: 63.999rem) 56vw, min(52vw, 52rem)';
+$image_srcset = static function ( $format ) use ( $image_widths ) {
+	$sources = array();
+	foreach ( $image_widths as $width ) {
+		$sources[] = get_theme_file_uri( sprintf( 'assets/images/home-personalized-shirt-%d.%s', $width, $format ) ) . ' ' . $width . 'w';
+	}
+	return implode( ', ', $sources );
+};
 ?>
 <section class="home-personalized" aria-labelledby="<?php echo esc_attr( $section_id ); ?>">
 	<div class="home-personalized__inner">
@@ -40,7 +50,11 @@ $section_id = 'home-personalized-title';
 					<path class="home-personalized__ribbon-band" data-personalized-ribbon-path d="M-140 430 C35 306 164 248 310 315 C457 383 570 511 720 385 C856 271 958 181 1090 276 C1242 385 1410 485 1680 250" />
 				</g>
 			</svg>
-			<img class="home-personalized__image" src="<?php echo esc_url( get_theme_file_uri( 'assets/images/home-personalized-shirt.png' ) ); ?>" alt="<?php echo esc_attr( $alt ); ?>" width="1448" height="1086" loading="lazy" decoding="async" />
+			<picture>
+				<source type="image/avif" srcset="<?php echo esc_attr( $image_srcset( 'avif' ) ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>" />
+				<source type="image/webp" srcset="<?php echo esc_attr( $image_srcset( 'webp' ) ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>" />
+				<img class="home-personalized__image" src="<?php echo esc_url( $image_url ); ?>" srcset="<?php echo esc_attr( $image_url . ' 1448w' ); ?>" sizes="<?php echo esc_attr( $image_sizes ); ?>" alt="<?php echo esc_attr( $alt ); ?>" width="1448" height="1086" loading="lazy" decoding="async" />
+			</picture>
 			<p class="home-personalized__body"><?php echo nl2br( esc_html( $content['body'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Newlines are converted to safe br tags after escaping. ?></p>
 		</div>
 		<?php if ( $page instanceof WP_Post ) : ?>
