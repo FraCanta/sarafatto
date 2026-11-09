@@ -459,7 +459,8 @@ def _validated_status_url(url):
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or parsed.hostname not in {"sara-fatto.it", "www.sara-fatto.it"}
             or parsed.path != "/wp-json/sarafatto/v1/deploy-barrier"
-            or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            or parsed.query or parsed.fragment or parsed.username or parsed.password
+            or parsed.netloc not in {"sara-fatto.it", "www.sara-fatto.it"}):
         raise BarrierError("URL consentito solo sullo status endpoint HTTPS fisso di SaràFatto.")
     return url
 
@@ -520,8 +521,11 @@ def verify_exclusive_interlock(token, *, url="https://sara-fatto.it/", opener=No
     from urllib.parse import urlsplit
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or parsed.hostname not in {"sara-fatto.it", "www.sara-fatto.it"}
-            or parsed.path != "/" or parsed.query or parsed.fragment):
+            or parsed.path != "/" or parsed.query or parsed.fragment
+            or parsed.netloc not in {"sara-fatto.it", "www.sara-fatto.it"}):
         raise BarrierError("Interlock HTTP consentito solo sulla homepage HTTPS SaràFatto.")
+    if not isinstance(token, str) or not 32 <= len(token) <= 256:
+        raise BarrierError("Token HTTP di verifica non valido.")
     request = urllib.request.Request(url, headers={
         "Cache-Control": "no-cache", "X-Sarafatto-Barrier-Token": token,
     })
@@ -533,6 +537,8 @@ def verify_exclusive_interlock(token, *, url="https://sara-fatto.it/", opener=No
         if exc.code != 503 or exc.headers.get("X-Sarafatto-Deploy-Barrier") != "active":
             raise BarrierError("La risposta non identifica la barriera SaràFatto in finestra esclusiva.") from exc
         return True
+    except (OSError, urllib.error.URLError) as exc:
+        raise BarrierError("Interlock HTTP non verificabile; nessuna autorizzazione alle scritture.") from exc
 
 
 def main(argv=None):

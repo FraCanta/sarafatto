@@ -57,6 +57,34 @@ class FakeOpener:
 
 
 class BarrierContractTests(unittest.TestCase):
+    def test_endpoint_non_invia_token_a_porte_o_credenziali_inattese(self):
+        for authority in ("sara-fatto.it:8443", "user@sara-fatto.it", "user:password@sara-fatto.it"):
+            for endpoint in ("status", "interlock"):
+                opener = FakeOpener()
+                with self.subTest(authority=authority, endpoint=endpoint):
+                    with self.assertRaises(barrier.BarrierError):
+                        if endpoint == "status":
+                            barrier.fetch_http_status(
+                                "t" * 40, url=f"https://{authority}/wp-json/sarafatto/v1/deploy-barrier",
+                                opener=opener)
+                        else:
+                            barrier.verify_exclusive_interlock(
+                                "t" * 40, url=f"https://{authority}/", opener=opener)
+                    self.assertIsNone(opener.request)
+
+    def test_interlock_timeout_redirect_e_successo_non_autorizzano_scritture(self):
+        for error in (TimeoutError("timeout"), urllib.error.URLError("offline"),
+                      urllib.error.HTTPError("https://sara-fatto.it/", 302, "redirect", {}, None)):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(barrier.BarrierError):
+                    barrier.verify_exclusive_interlock("t" * 40, opener=FakeOpener(error=error))
+        with self.assertRaises(barrier.BarrierError):
+            barrier.verify_exclusive_interlock("t" * 40, opener=FakeOpener(FakeResponse({})))
+        opener = FakeOpener()
+        with self.assertRaises(barrier.BarrierError):
+            barrier.verify_exclusive_interlock("", opener=opener)
+        self.assertIsNone(opener.request)
+
     def test_schema_config_accetta_default_disabilitato_e_rifiuta_path_arbitrari(self):
         config = {
             "schema_version": 1, "enabled": False,

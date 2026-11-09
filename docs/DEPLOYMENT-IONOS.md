@@ -791,3 +791,157 @@ I vecchi comandi separati di ispezione/preflight possono conservare i propri
 vincoli sul repository: non sono invocati da questo percorso di trasferimento.
 `publish`, `rollback` e `recover` pubblici restano disabilitati; il push su main
 non abilita automaticamente lo staging o la pubblicazione.
+# Fase 4B — collaudo protetto prima delle scritture pubbliche
+
+## Esito e perimetro
+
+La toolchain #53 autorizzata ha digest
+`ad869db3c7fbb3065fc05e447a8fdc7d99b2b8d78ad8e0aca674edcce11764f8`.
+Non viene sostituita da questa revisione: i sette file del suo contratto restano
+invariati. Le modifiche qui introdotte riguardano il verificatore HTTP separato,
+i suoi test, il workflow e questo runbook. Non installarli implicitamente nella
+toolchain già approvata. Nessuna verifica del trasferimento viene ripetuta.
+
+La candidata `042e1a5b183e921cda5043432948bc0632609e27`, run `40746174010`,
+cambia soltanto il MU-plugin (524 → 9568 byte). Il confronto Git con
+`911d6a72ac0f624dc85b43d53b1c299968d683f6` conserva byte per byte la funzione
+Polylang e il suo filtro. L'aumento introduce configurazione privata, lock,
+marker, diagnostica REST autenticata e attesa diagnostica limitata a 2000 ms.
+Non è un aggiornamento del tema. L'installazione iniziale resta separata da una
+pubblicazione applicativa e non deve dichiarare pubblicata tutta la candidata.
+
+## Capacità del provider e proprietà ancora non dimostrate
+
+La documentazione IONOS descrive OPcache nel Web Hosting e la configurazione
+tramite php.ini; non costituisce un'attestazione del pool di questo contratto:
+https://www.ionos.com/help/hosting/using-php-for-web-projects/speeding-up-websites-with-php-opcache/
+https://www.ionos.it/aiuto/hosting/utilizzo-di-php-per-i-progetti-web/modificare-le-impostazioni-php-con-phpini/
+Non assumere accesso a systemctl, socket FPM, drain, riavvio o una singola cache
+condivisa. Chiedere a IONOS quali pool/backend servano il dominio, come sospendere
+e drenare le richieste e come invalidare OPcache (inclusa file cache) su tutti.
+La CLI non dimostra identità utente, open_basedir, impostazioni o lock della SAPI web.
+
+I probe filesystem già superati dimostrano primitive, non coerenza WordPress.
+Rename di un file è atomico; una sequenza di rename non lo è. Symlink separati
+non coordinano i componenti. Un unico puntatore richiederebbe pinning precoce
+per richiesta di tutti i percorsi PHP e URL asset versionati: WordPress attuale
+non lo implementa, quindi questa revisione non lo propone come soluzione pronta.
+
+Due limiti specifici del MU-plugin devono impedire l'abilitazione multi-file:
+
+- `source_sha256` legge il file sul disco: vecchio bytecode può leggere il nuovo
+  file e riportarne l'hash. Non è una firma del codice realmente in esecuzione.
+- Il callback di rilascio è registrato durante il bootstrap MU. PHP esegue i
+  callback shutdown nell'ordine di registrazione: callback aggiunti successivamente
+  possono usare componenti gestiti dopo il rilascio. WordPress registra già il
+  proprio shutdown hook prima dei MU-plugin, ma questo non copre callback PHP
+  successivi. Serve verificare il mantenimento del lock fino all'ultimo utilizzo
+  dei componenti, preferibilmente tramite durata della risorsa fino al teardown
+  PHP, con test reali prima di cambiare il MU-plugin e il suo digest autorizzato.
+
+Inoltre il MU-plugin viene dopo core, drop-in e possibili altri MU-plugin.
+Inventariare entrypoint diretti, SHORTINIT, cron/CLI e callback che caricano tema
+o plugin prima della barriera o senza attraversarla. Static asset e cache HTTP
+non acquisiscono il lock: mantenere asset hashati precedenti ed escludere da cache
+le risposte diagnostiche/503. Se il percorso gestito è raggiungibile senza lock,
+la garanzia richiesta resta non dimostrata.
+
+## Strategia e ordine del collaudo (richiedono autorizzazione separata)
+
+1. Senza scritture pubbliche, ottenere risposta del provider sui punti precedenti;
+   raccogliere la configurazione PHP web tramite endpoint autenticato già previsto,
+   senza phpinfo pubblico. Registrare SAPI, UID, pool/backend se disponibile,
+   open_basedir, realpath TTL, OPcache enable/validate_timestamps/revalidate_freq,
+   file_cache/file_cache_only e metodo di invalidazione. Non interpretare un
+   campione di worker come copertura di tutti i backend.
+2. Prima installazione: controllare hash vecchio/nuovo, backup ufficiale con digest
+   indipendente, sintassi PHP e filtro Polylang; configurazione disabilitata e
+   marker assente. Solo una successiva procedura autorizzata può sostituire
+   atomicamente il singolo MU-plugin e registrare il delta verificato. `install`
+   resta disabilitato. Vecchio/nuovo codice Polylang compatibile non prova ancora
+   il funzionamento della barriera; non armare il marker in questa fase.
+3. Provare accessibilità da PHP web senza attivare; poi attivazione esplicita in
+   finestra autorizzata. Una richiesta lunga autenticata deve attestare LOCK_SH
+   acquisito prima che il controller armi un marker esclusivo per operation ID.
+   Lanciare richieste nuove concorrenti: devono ricevere 503, header dedicato,
+   no-store; la richiesta già ammessa deve completare con la vecchia versione.
+4. Il controller mantiene site-operation.lock, arma/fsync il marker, tenta LOCK_EX
+   con timeout finito e verifica la stessa identità inode. Nessuna scrittura finché
+   non drena ogni reader. Il controllo marker prima e dopo LOCK_SH chiude la race
+   di ammissione solo per richieste che eseguono effettivamente questa barriera.
+   Ripetere includendo callback shutdown tardivi e richieste già avviate.
+5. Senza cambiare componenti pubblici, provare timeout, errore, crash del controller
+   e acquisizione concorrente. Il marker deve restare a bloccare fino al recovery
+   verificato; non rimuoverlo per timeout automaticamente. Verificare che il lock
+   non sia stato ricreato e che nessuna richiesta protetta prosegua durante LOCK_EX.
+6. In un endpoint PHP isolato e autenticato, autorizzato separatamente, distinguere
+   la versione compilata con un literal dalla misura del sorgente; provare switch
+   A/B e invalidazione su tutti i backend, anche dopo rilascio della finestra.
+   Un endpoint che calcola soltanto hash_file non soddisfa questo test.
+7. Se provider, coverage o shutdown non consentono tali prove, lasciare bloccato il
+   publisher. Alternativa concreta: manutenzione a livello ingresso del provider
+   con drain attestato e invalidazione di tutti i pool, oppure hosting che offra
+   tali controlli. La sola .maintenance non è un drain.
+
+## Backup fresco, health e recovery
+
+Il motore `_run_filesystem_release_transaction` già esistente crea e verifica un
+backup fresco ed esegue restore-test privato sotto lo stesso site-operation.lock,
+prima del journal publishing e delle scritture. Non sostituire questa sequenza
+con il solo backup storico. Il backup protegge esclusivamente il perimetro gestito,
+inclusi i nove extra, non database, upload o plugin esterni.
+
+Per un collaudo privato manuale futuro, questi sono i comandi esistenti (scrivono
+solo backup/staging privati; non eseguiti in questa attività). Sostituire le tre
+variabili con quota appena confermata e ID/digest registrati indipendentemente
+dall'esito della creazione, non ricavati da un backup sospetto:
+
+```bash
+set -euo pipefail
+TOOLS=/home/www/sarafatto-deploy/tools/scripts/deploy
+BASELINE=07f330549f9e889618dd9f00a346af0d841880594dc5f54ecdd9d3165486b6bd
+: "${QUOTA_FREE_BYTES:?quota account verificata richiesta}"
+python3 "$TOOLS/backup_tool.py" backup --baseline-sha256 "$BASELINE" --account-quota-free-bytes "$QUOTA_FREE_BYTES"
+# Registrare e approvare separatamente BACKUP_ID e MANIFEST_SHA256 prima di proseguire.
+: "${BACKUP_ID:?ID fresco richiesto}" "${MANIFEST_SHA256:?digest indipendente richiesto}"
+python3 "$TOOLS/backup_tool.py" verify --backup-id "$BACKUP_ID" --baseline-sha256 "$BASELINE" --manifest-sha256 "$MANIFEST_SHA256"
+python3 "$TOOLS/backup_tool.py" restore-test --backup-id "$BACKUP_ID" --baseline-sha256 "$BASELINE" --manifest-sha256 "$MANIFEST_SHA256" --account-quota-free-bytes "$QUOTA_FREE_BYTES"
+```
+
+Non avviare questi comandi dentro un altro lock CLI autonomo (le primitive interne
+condividono il descriptor verificato). Restore-test non ripristina WordPress.
+Il recovery pubblico resta disabilitato: prima di abilitarlo deve poter distinguere
+parent/candidato tramite hash reali e journal, ripristinare solo il perimetro
+autorizzato e trattenere il marker in caso di stato non dimostrabile.
+
+Il health check attuale verifica HTTPS/2xx/body, ma non prova da solo il corretto
+funzionamento WordPress. Per il collaudo aggiungere evidenze attese a homepage,
+root delle lingue Polylang, archivio e un prodotto noto (URL scelti dal sito reale),
+REST e navigazione anonima/autenticata; nessun checkout o mutazione di prodotti.
+Verificare risposta non proveniente da vecchia cache, firma applicativa attesa,
+assenza di fatal e link corretti. Scaricare gli asset referenziati dal nuovo
+manifest e confrontarne SHA-256, MIME e dimensioni con l'artifact; nessuna richiesta
+404 o chunk perso. I check che richiedono WordPress vanno eseguiti dopo rilascio
+controllato della barriera: chiamarli sotto LOCK_EX/marker attivo produce 503.
+In quel periodo mantenere lock operativo e capacità di riarmare/drenare prima
+del rollback. Non aggirare il lock tramite un header di health check.
+
+## GitHub Environment e criteri di autorizzazione
+
+Il nuovo job `production-authorization-review` dipende da validate e build,
+esiste solo con workflow_dispatch e input `review_production_readiness=true`.
+Usa Environment `ionos-production`, nessun Secret o comando SSH e scrive soltanto
+il summary GitHub con SHA/run e blocchi. Un successo significa revisione registrata,
+mai release pubblicata. Non è un collegamento al publisher disabilitato.
+
+Configurare manualmente su GitHub revisori obbligatori, prevenzione self-review,
+branch main soltanto e divieto di bypass ove il piano GitHub lo supporti.
+La dichiarazione YAML non configura queste protezioni; se indisponibili, fermarsi
+prima di collegare scritture pubbliche. Non spostare Secrets di produzione nel job
+di revisione. Su push restano solo CI/build, le operazioni remote sono dispatch-only.
+
+Prima autorizzazione pubblica: prove web/drain/shutdown/OPcache complete, prima
+migrazione separata conclusa e stato verificato, backup fresco con restore-test,
+piano esatto senza rimozioni inattese, nove extra conservati, approvazione legata
+a SHA+artifact+parent+operation ID, recovery collaudato e revisione Environment.
+Nessun semplice flag o successo di questo job sostituisce tali requisiti.

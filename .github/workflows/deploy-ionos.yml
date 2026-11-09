@@ -25,6 +25,11 @@ on:
         required: true
         default: false
         type: boolean
+      review_production_readiness:
+        description: Revisione protetta di produzione, senza SSH e senza pubblicazione
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -34,6 +39,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  production-authorization-review:
+    needs: [validate, build-artifact]
+    if: github.event_name == 'workflow_dispatch' && inputs.review_production_readiness == true
+    runs-on: ubuntu-24.04
+    environment: ionos-production
+    permissions:
+      contents: read
+    steps:
+      - name: Registra revisione senza autorizzare scritture
+        env:
+          AUTHORIZED_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AUTHORIZED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$AUTHORIZED_SHA" == "$GITHUB_SHA" ]]
+          {
+            echo '## Revisione produzione: pubblicazione bloccata'
+            printf 'Commit revisionato: `%s`\n\n' "$AUTHORIZED_SHA"
+            printf 'Run: `%s`\n\n' "$GITHUB_RUN_ID"
+            echo 'Questa approvazione registra soltanto la revisione; non autorizza deploy, rollback o recovery.'
+            echo 'Restano obbligatorie le prove PHP web, drain, shutdown e OPcache descritte nel runbook Fase 4B.'
+            echo 'Nessuna connessione SSH e nessuna scrittura pubblica eseguite.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   validate:
     runs-on: ubuntu-24.04
     steps:
