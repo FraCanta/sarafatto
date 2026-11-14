@@ -10,6 +10,7 @@ import re
 import secrets
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -178,7 +179,6 @@ class Maintenance:
             payload = json.loads(response.read(8193))
         validate_runtime(payload, self.operation_id, nonce)
         # Also prove that ordinary anonymous traffic is actually denied.
-        import urllib.error
         try:
             with self.opener.open(urllib.request.Request('https://sara-fatto.it/', headers={
                     'Cache-Control': 'no-cache, no-store'}), timeout=15):

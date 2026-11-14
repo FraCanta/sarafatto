@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 import theme_deploy as deploy
@@ -26,6 +27,37 @@ def runtime(**changes):
 
 
 class Contracts(unittest.TestCase):
+    def test_maintenance_probe_verifica_risposta_autenticata_e_503_anonimo(self):
+        url = 'https://sara-fatto.it/'
+        operation_id, token, nonce = 'theme-12345-1', 't'*64, 'n'*48
+        payload = runtime(nonce=nonce)
+        response = mock.MagicMock(status=200, headers={
+            'X-Sarafatto-Theme-Maintenance': operation_id})
+        response.__enter__.return_value = response
+        response.geturl.return_value = url
+        response.read.return_value = json.dumps(payload).encode()
+        anonymous = urllib.error.HTTPError(url, 503, 'Maintenance', {
+            'X-Sarafatto-Theme-Maintenance': operation_id}, None)
+        opener = mock.Mock()
+        opener.open.side_effect = [response, anonymous]
+        window = deploy.Maintenance(pathlib.Path('unused'), operation_id, token, opener=opener)
+
+        with mock.patch.object(deploy.secrets, 'token_hex', return_value=nonce) as nonce_factory:
+            self.assertEqual(window.probe(), payload)
+        nonce_factory.assert_called_once_with(24)
+        self.assertEqual(opener.open.call_count, 2)
+        authenticated_call, anonymous_call = opener.open.call_args_list
+        authenticated_request = authenticated_call.args[0]
+        anonymous_request = anonymous_call.args[0]
+        self.assertEqual(authenticated_request.get_header('X-sarafatto-theme-token'), token)
+        self.assertEqual(authenticated_request.get_header('X-sarafatto-theme-nonce'), nonce)
+        self.assertIsNone(anonymous_request.get_header('X-sarafatto-theme-token'))
+        self.assertIsNone(anonymous_request.get_header('X-sarafatto-theme-nonce'))
+        for call in opener.open.call_args_list:
+            self.assertEqual(call.args[0].full_url, url)
+            self.assertEqual(call.args[0].get_header('Cache-control'), 'no-cache, no-store')
+            self.assertEqual(call.kwargs, {'timeout': 15})
+
     def test_pubblicazione_richiede_approvazione_github_del_revisore_esatto(self):
         approval = {'state': 'approved', 'user': {'login': 'FraCanta'},
                     'environments': [{'name': 'ionos-production'}]}
