@@ -2,7 +2,10 @@
 /** Scroll-linked brand ribbon separator for the homepage. */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-$ribbon_text = implode( ' ', array_fill( 0, 12, 'SARÀ FATTO ·' ) );
+$is_custom_ribbon = isset( $args['phrase'] ) && is_string( $args['phrase'] );
+$ribbon_phrase    = $is_custom_ribbon ? trim( $args['phrase'] ) : 'SARÀ FATTO ·';
+$ribbon_copies    = isset( $args['copies'] ) ? max( 1, min( 12, absint( $args['copies'] ) ) ) : 12;
+$ribbon_text      = implode( $is_custom_ribbon ? '   ' : ' ', array_fill( 0, $ribbon_copies, $ribbon_phrase ) );
 ?>
 <div class="home-scroll-ribbon" aria-hidden="true">
 	<svg class="home-scroll-ribbon__art" viewBox="0 0 1600 300" preserveAspectRatio="none" focusable="false">
@@ -16,7 +19,7 @@ $ribbon_text = implode( ' ', array_fill( 0, 12, 'SARÀ FATTO ·' ) );
 		<g data-ribbon-elastic mask="url(#home-scroll-ribbon-reveal)">
 			<use href="#home-scroll-ribbon-path" class="home-scroll-ribbon__band" fill="none" stroke="#11b9d0" stroke-width="68" stroke-linecap="round" />
 			<text class="home-scroll-ribbon__text">
-				<textPath href="#home-scroll-ribbon-path" data-ribbon-marquee startOffset="0"><?php echo esc_html( $ribbon_text ); ?></textPath>
+				<textPath href="#home-scroll-ribbon-path" data-ribbon-marquee<?php echo $is_custom_ribbon ? ' data-ribbon-phrase="' . esc_attr( $ribbon_phrase ) . '"' : ''; ?> startOffset="0"><?php echo esc_html( $ribbon_text ); ?></textPath>
 			</text>
 		</g>
 	</svg>

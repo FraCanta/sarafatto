@@ -63,20 +63,26 @@ $products_url = function_exists( 'sarafatto_get_products_archive_url' ) ? sarafa
 $whatsapp_url = function_exists( 'sarafatto_get_whatsapp_url' ) ? sarafatto_get_whatsapp_url( sarafatto_theme_label( 'Ciao Sara, cerco un’idea regalo.', 'Hi Sara, I’m looking for a gift idea.' ) ) : '';
 ?>
 <main id="main-content" class="site-main gift-ideas" tabindex="-1">
+	<?php while ( have_posts() ) : the_post(); ?>
+		<?php
+		ob_start();
+		the_content();
+		$gift_intro_content = ob_get_clean();
+		get_template_part(
+			'template-parts/components/page-hero',
+			null,
+			array(
+				'title' => get_the_title(),
+				'breadcrumbs' => array(
+					array( 'label' => sarafatto_theme_label( 'Home', 'Home' ), 'url' => function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ),
+					array( 'label' => get_the_title() ),
+				),
+				'description_html' => trim( wp_strip_all_tags( $gift_intro_content ) ) ? $gift_intro_content : '',
+			)
+		);
+		?>
+	<?php endwhile; ?>
 	<div class="container gift-ideas__container">
-		<?php while ( have_posts() ) : the_post(); ?>
-			<header class="gift-ideas__intro">
-				<nav class="product-archive__breadcrumb" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Percorso di navigazione', 'Breadcrumb' ) ); ?>">
-					<a href="<?php echo esc_url( function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Home', 'Home' ) ); ?></a>
-					<span aria-hidden="true">›</span>
-					<span aria-current="page"><?php echo esc_html( get_the_title() ); ?></span>
-				</nav>
-				<h1 class="gift-ideas__title"><span class="editorial-underline editorial-underline--02"><?php echo esc_html( get_the_title() ); ?></span></h1>
-				<?php if ( trim( wp_strip_all_tags( get_the_content() ) ) ) : ?>
-					<div class="gift-ideas__description"><?php the_content(); ?></div>
-				<?php endif; ?>
-			</header>
-		<?php endwhile; ?>
 
 		<?php if ( $gift_sections ) : ?>
 			<nav class="gift-ideas__quick-nav" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Navigazione rapida idee regalo', 'Quick navigation for gift ideas' ) ); ?>">

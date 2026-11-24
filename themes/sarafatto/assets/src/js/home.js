@@ -7,11 +7,10 @@ import { initHomePersonalized } from './home-personalized.js';
 import { initHomeServiceStrip } from './home-service-strip.js';
 import { initHomeSectionReveals } from './home-section-reveals.js';
 import { initHomeScrollRibbon } from './home-scroll-ribbon.js';
-import { initSmoothScroll } from './smooth-scroll.js';
+import { getLenisInstance } from './scroll-bridge.js';
 import { connectLenisToScrollTrigger } from './motion-runtime.js';
 
-const lenis = initSmoothScroll();
-connectLenisToScrollTrigger(lenis);
+connectLenisToScrollTrigger(getLenisInstance());
 
 if (initHomeHero()) initHomeHeroScroll();
 initFeaturedProducts();

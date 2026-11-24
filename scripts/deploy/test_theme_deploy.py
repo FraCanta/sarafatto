@@ -27,6 +27,51 @@ def runtime(**changes):
 
 
 class Contracts(unittest.TestCase):
+    def test_php_marker_non_duplica_json_durante_shutdown_manutenzione(self):
+        php = shutil.which('php')
+        if php is None:
+            if os.environ.get('SARAFATTO_REQUIRE_POSIX') == '1':
+                self.fail('PHP CLI richiesto su Ubuntu per eseguire il marker generato.')
+            self.skipTest('PHP CLI assente.')
+        wp = pathlib.Path(__file__).resolve().parents[3] / 'wp-includes'
+        # Use the real local WordPress functions/handler where present. CI only
+        # checks out wp-content, so its fallback reproduces the same require on
+        # entry and at shutdown without a database or a WordPress installation.
+        if (wp / 'load.php').is_file() and (wp / 'class-wp-fatal-error-handler.php').is_file():
+            bootstrap = ("require $argv[4]; require $argv[5];\n"
+                         "function apply_filters($hook, $value, ...$args) { return $value; }\n"
+                         "register_shutdown_function(array(new WP_Fatal_Error_Handler(), 'handle'));\n")
+        else:
+            bootstrap = ("function wp_is_maintenance_mode() { global $upgrading;\n"
+                         "require ABSPATH . '.maintenance'; return (time() - $upgrading) < 600; }\n"
+                         "register_shutdown_function(function () { wp_is_maintenance_mode(); });\n")
+        script = ("ob_start(); http_response_code(200);\n"
+                  "define('ABSPATH', $argv[1] . '/'); define('MINUTE_IN_SECONDS', 60);\n"
+                  "$_SERVER['HTTP_X_SARAFATTO_THEME_TOKEN'] = $argv[2];\n"
+                  "$_SERVER['HTTP_X_SARAFATTO_THEME_NONCE'] = $argv[3];\n" + bootstrap +
+                  "register_shutdown_function(function () { fwrite(STDERR, 'http_status=' . http_response_code()); });\n"
+                  "if (wp_is_maintenance_mode()) { http_response_code(503); echo 'ANONYMOUS_MAINTENANCE'; }\n")
+        token, nonce = 't'*64, 'n'*48
+        with tempfile.TemporaryDirectory() as temp:
+            marker = pathlib.Path(temp) / '.maintenance'
+            marker.write_bytes(deploy.maintenance_php('theme-43615022420-1', token))
+            for supplied_token, authenticated in ((token, True), ('wrong-token', False)):
+                with self.subTest(authenticated=authenticated):
+                    result = subprocess.run(
+                        [php, '-d', 'display_errors=stderr', '-d', 'log_errors=0', '-r', script,
+                         temp, supplied_token, nonce, str(wp / 'load.php'),
+                         str(wp / 'class-wp-fatal-error-handler.php')],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                    self.assertEqual(result.returncode, 0)
+                    if authenticated:
+                        payload = json.loads(result.stdout)
+                        self.assertEqual(payload['operation_id'], 'theme-43615022420-1')
+                        self.assertEqual(payload['nonce'], nonce)
+                        self.assertEqual(result.stderr, b'http_status=200')
+                    else:
+                        self.assertEqual(result.stdout, b'ANONYMOUS_MAINTENANCE')
+                        self.assertEqual(result.stderr, b'http_status=503')
+
     def test_maintenance_probe_verifica_risposta_autenticata_e_503_anonimo(self):
         url = 'https://sara-fatto.it/'
         operation_id, token, nonce = 'theme-12345-1', 't'*64, 'n'*48
@@ -57,6 +102,62 @@ class Contracts(unittest.TestCase):
             self.assertEqual(call.args[0].full_url, url)
             self.assertEqual(call.args[0].get_header('Cache-control'), 'no-cache, no-store')
             self.assertEqual(call.kwargs, {'timeout': 15})
+
+    def test_maintenance_probe_rifiuta_json_extra_malformato_e_risposta_eccessiva(self):
+        nonce = 'n'*48
+        valid = json.dumps(runtime(nonce=nonce)).encode()
+        cases = (
+            ('second-json', valid + valid, json.JSONDecodeError),
+            ('html-after-json', valid + b'<html>maintenance</html>', json.JSONDecodeError),
+            ('text-after-json', valid + b'additional-data', json.JSONDecodeError),
+            ('malformed', b'{"operation_id":', json.JSONDecodeError),
+            ('empty', b'', json.JSONDecodeError),
+            # A valid prefix followed by data beyond the read limit must not pass.
+            ('oversize', valid + b' '*8193 + b'extra', deploy.ThemeDeployError),
+        )
+        for name, raw, error in cases:
+            with self.subTest(case=name):
+                response = mock.MagicMock(status=200, headers={
+                    'Content-Type': 'application/json',
+                    'X-Sarafatto-Theme-Maintenance': 'theme-12345-1'})
+                response.__enter__.return_value = response
+                response.geturl.return_value = 'https://sara-fatto.it/'
+                response.read.side_effect = lambda limit: raw[:limit]
+                opener = mock.Mock()
+                opener.open.return_value = response
+                window = deploy.Maintenance(pathlib.Path('unused'), 'theme-12345-1', 't'*64, opener=opener)
+                with mock.patch.object(deploy.secrets, 'token_hex', return_value=nonce):
+                    with self.assertRaises(error):
+                        window.probe()
+                self.assertEqual(opener.open.call_count, 1)
+
+    def test_maintenance_probe_rifiuta_status_nonce_opcache_e_503_estraneo(self):
+        nonce = 'n'*48
+        cases = (
+            ('authenticated-not-200', 201, runtime(nonce=nonce), '503', 'theme-12345-1', 1),
+            ('wrong-nonce', 200, runtime(nonce='wrong'), '503', 'theme-12345-1', 1),
+            ('opcache-not-ready', 200, runtime(nonce=nonce, revalidate_freq='180'), '503', 'theme-12345-1', 1),
+            ('anonymous-200', 200, runtime(nonce=nonce), '200', 'theme-12345-1', 2),
+            ('anonymous-502', 200, runtime(nonce=nonce), '502', 'theme-12345-1', 2),
+            ('foreign-503', 200, runtime(nonce=nonce), '503', 'other-operation', 2),
+        )
+        for name, status, payload, anonymous_status, operation_id, calls in cases:
+            with self.subTest(case=name):
+                response = mock.MagicMock(status=status, headers={
+                    'X-Sarafatto-Theme-Maintenance': 'theme-12345-1'})
+                response.__enter__.return_value = response
+                response.geturl.return_value = 'https://sara-fatto.it/'
+                response.read.return_value = json.dumps(payload).encode()
+                anonymous = response if anonymous_status == '200' else urllib.error.HTTPError(
+                    'https://sara-fatto.it/', int(anonymous_status), 'Maintenance',
+                    {'X-Sarafatto-Theme-Maintenance': operation_id}, None)
+                opener = mock.Mock()
+                opener.open.side_effect = [response, anonymous]
+                window = deploy.Maintenance(pathlib.Path('unused'), 'theme-12345-1', 't'*64, opener=opener)
+                with mock.patch.object(deploy.secrets, 'token_hex', return_value=nonce):
+                    with self.assertRaises(deploy.ThemeDeployError):
+                        window.probe()
+                self.assertEqual(opener.open.call_count, calls)
 
     def test_pubblicazione_richiede_approvazione_github_del_revisore_esatto(self):
         approval = {'state': 'approved', 'user': {'login': 'FraCanta'},

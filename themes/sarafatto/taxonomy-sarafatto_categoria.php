@@ -38,20 +38,22 @@ $filter_args = array(
 );
 ?>
 <main id="main-content" class="site-main product-archive product-category-archive" tabindex="-1">
+	<?php
+	get_template_part(
+		'template-parts/components/page-hero',
+		null,
+		array(
+			'title' => $term->name,
+			'breadcrumbs' => array(
+				array( 'label' => sarafatto_theme_label( 'Home', 'Home' ), 'url' => function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ),
+				array( 'label' => sarafatto_theme_label( 'Prodotti', 'Products' ), 'url' => $archive_url ),
+				array( 'label' => $term->name ),
+			),
+			'description_html' => $description,
+		)
+	);
+	?>
 	<div class="container">
-		<header class="product-archive__intro">
-			<nav class="product-archive__breadcrumb" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Percorso di navigazione', 'Breadcrumb' ) ); ?>">
-				<a href="<?php echo esc_url( function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Home', 'Home' ) ); ?></a>
-				<span aria-hidden="true">›</span>
-				<a href="<?php echo esc_url( $archive_url ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Prodotti', 'Products' ) ); ?></a>
-				<span aria-hidden="true">›</span>
-				<span aria-current="page"><?php echo esc_html( $term->name ); ?></span>
-			</nav>
-			<h1 class="product-archive__title"><span class="editorial-underline editorial-underline--02"><?php echo esc_html( $term->name ); ?></span></h1>
-			<?php if ( '' !== $description ) : ?>
-				<div class="product-archive__description"><?php echo $description; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Sanitized with wp_kses_post(). ?></div>
-			<?php endif; ?>
-		</header>
 
 		<section class="product-category-archive__results" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Catalogo prodotti', 'Product catalog' ) ); ?>">
 			<?php get_template_part( 'template-parts/products/archive-toolbar', null, array( 'action_url' => $category_url, 'selected_gift' => $selected_gift, 'selected_occasion' => $selected_occasion, 'personalizable' => $personalizable, 'category_context' => true, 'filters' => $filter_args ) ); ?>

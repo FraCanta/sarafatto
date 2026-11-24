@@ -74,6 +74,10 @@ function sarafatto_page_script_entry() {
 	if ( function_exists( 'is_post_type_archive' ) && is_post_type_archive( 'sarafatto_prodotto' ) ) {
 		return 'productArchive';
 	}
+	$contact_page_id = function_exists( 'sarafatto_get_linked_page_id' ) ? sarafatto_get_linked_page_id( 'contatti' ) : 0;
+	if ( ( $contact_page_id && is_page( $contact_page_id ) ) || is_page( array( 'contatti', 'contact' ) ) ) {
+		return 'contact';
+	}
 	return '';
 }
 
@@ -104,6 +108,7 @@ function sarafatto_enqueue_assets() {
 			'home'          => 'assets/src/js/home.js',
 			'product'       => 'assets/src/js/product.js',
 			'productArchive' => 'assets/src/js/product-archive.js',
+			'contact'       => 'assets/src/js/contact.js',
 		);
 		$page_key = $page_keys[ $page_entry ] ?? '';
 		if ( $page_key ) {

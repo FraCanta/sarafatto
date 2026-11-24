@@ -15,3 +15,5 @@ require_once get_theme_file_path( '/inc/enqueue.php' );
 require_once get_theme_file_path( '/inc/helpers.php' );
 require_once get_theme_file_path( '/inc/home.php' );
 require_once get_theme_file_path( '/inc/primary-navigation.php' );
+require_once get_theme_file_path( '/inc/contact-form.php' );
+require_once get_theme_file_path( '/inc/personalized-request.php' );

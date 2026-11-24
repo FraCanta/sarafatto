@@ -78,6 +78,9 @@ def maintenance_php(operation_id, token):
         raise ThemeDeployError('Operation ID non valido.')
     digest = hashlib.sha256(token.encode()).hexdigest()
     return ("<?php\n$upgrading = time();\n"
+            "// WordPress may require this marker again from its shutdown handler.\n"
+            "if (defined('SARAFATTO_THEME_MAINTENANCE_INCLUDED')) { return; }\n"
+            "define('SARAFATTO_THEME_MAINTENANCE_INCLUDED', true);\n"
             f"header('X-Sarafatto-Theme-Maintenance: {operation_id}');\n"
             "header('Cache-Control: no-store, max-age=0');\n"
             f"if (hash_equals('{digest}', hash('sha256', $_SERVER['HTTP_X_SARAFATTO_THEME_TOKEN'] ?? ''))) {{\n"
@@ -176,7 +179,10 @@ class Maintenance:
             if (response.status != 200 or response.geturl() != request.full_url
                     or response.headers.get('X-Sarafatto-Theme-Maintenance') != self.operation_id):
                 raise ThemeDeployError('Probe manutenzione inatteso.')
-            payload = json.loads(response.read(8193))
+            raw = response.read(8193)
+            if len(raw) > 8192:
+                raise ThemeDeployError('Risposta probe manutenzione oltre il limite di 8192 byte.')
+            payload = json.loads(raw)
         validate_runtime(payload, self.operation_id, nonce)
         # Also prove that ordinary anonymous traffic is actually denied.
         try:

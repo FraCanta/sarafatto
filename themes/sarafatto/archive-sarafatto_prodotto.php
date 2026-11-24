@@ -16,30 +16,19 @@ $catalog_title_accent = sarafatto_theme_label( 'prodotti', 'products' );
 $catalog_title_after = sarafatto_theme_label( 'in un unico posto.', 'in one place.' );
 ?>
 <main id="main-content" class="site-main product-archive product-archive--products" tabindex="-1">
-	<section class="product-archive-hero" data-product-archive-hero aria-labelledby="product-archive-hero-title">
-		<svg class="product-archive-hero__shape" viewBox="0 0 1440 820" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-			<path data-product-archive-curve d="M0 0H1440V680 C1080 840 360 840 0 680Z" />
-		</svg>
-		<div class="product-archive-hero__content">
-			<h1 class="product-archive-hero__title" id="product-archive-hero-title">
-				<span class="product-archive-hero__track" aria-hidden="true">
-					<?php for ( $copy = 0; $copy < 2; $copy++ ) : ?>
-						<span class="product-archive-hero__group">
-							<?php for ( $item = 0; $item < 4; $item++ ) : ?>
-								<span><?php echo esc_html( $products_label ); ?></span><span class="product-archive-hero__asterisk" aria-hidden="true">*</span>
-							<?php endfor; ?>
-						</span>
-					<?php endfor; ?>
-				</span>
-				<span class="screen-reader-text"><?php echo esc_html( sarafatto_theme_label( 'Prodotti', 'Products' ) ); ?></span>
-			</h1>
-			<nav class="product-archive-hero__breadcrumb" aria-label="<?php echo esc_attr( sarafatto_theme_label( 'Percorso di navigazione', 'Breadcrumb' ) ); ?>">
-				<a href="<?php echo esc_url( function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ); ?>"><?php echo esc_html( sarafatto_theme_label( 'Home', 'Home' ) ); ?></a>
-				<span aria-hidden="true">›</span>
-				<span aria-current="page"><?php echo esc_html( sarafatto_theme_label( 'Prodotti', 'Products' ) ); ?></span>
-			</nav>
-		</div>
-	</section>
+	<?php
+	get_template_part(
+		'template-parts/components/page-hero',
+		null,
+		array(
+			'title' => $products_label,
+			'breadcrumbs' => array(
+				array( 'label' => sarafatto_theme_label( 'Home', 'Home' ), 'url' => function_exists( 'sarafatto_get_language_home_url' ) ? sarafatto_get_language_home_url() : home_url( '/' ) ),
+				array( 'label' => sarafatto_theme_label( 'Prodotti', 'Products' ) ),
+			),
+		)
+	);
+	?>
 	<section class="product-archive-intro" data-product-archive-intro aria-labelledby="product-archive-intro-title">
 		<div class="product-archive-intro__inner container">
 			<h2 class="product-archive-intro__title" id="product-archive-intro-title">

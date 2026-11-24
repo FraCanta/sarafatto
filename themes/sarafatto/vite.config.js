@@ -31,6 +31,7 @@ export default defineConfig({
         home: resolve(root, 'assets/src/js/home.js'),
         product: resolve(root, 'assets/src/js/product.js'),
         productArchive: resolve(root, 'assets/src/js/product-archive.js'),
+        contact: resolve(root, 'assets/src/js/contact.js'),
       },
     },
   },
